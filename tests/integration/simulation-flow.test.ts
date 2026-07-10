@@ -461,6 +461,57 @@ describe('shape factory simulation', () => {
     expect(result.belts[belt.id].enteredTick).toBeGreaterThan(0)
   })
 
+  it('keeps an upstream item when an occupied downstream belt is blocked', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+    project = placeBuilding(project, 'belt', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 1, y: 0 }, 'east')
+
+    const belts = project.entities.filter((entity) => entity.type === 'belt').sort((a, b) => a.position.x - b.position.x)
+    project.belts[belts[0].id].item = { id: 'upstream', shape: 'circle', age: 0 }
+    project.belts[belts[0].id].enteredTick = project.tick - 2
+    project.belts[belts[1].id].item = { id: 'downstream', shape: 'square', age: 0 }
+    project.belts[belts[1].id].enteredTick = project.tick - 2
+
+    const result = runTick(project).project
+
+    expect(result.belts[belts[0].id].item?.id).toBe('upstream')
+    expect(result.belts[belts[1].id].item?.id).toBe('downstream')
+    expect(result.metrics.beltItems).toBe(2)
+  })
+  it('conserves item identities across a blocked route with two turns', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'belt', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 1, y: 0 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 2, y: 0 }, 'south')
+    project = placeBuilding(project, 'belt', { x: 2, y: 1 }, 'south')
+    project = placeBuilding(project, 'belt', { x: 2, y: 2 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 3, y: 2 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 4, y: 2 }, 'east')
+
+    const seeded = project.entities
+      .filter((entity) => entity.kind === 'belt')
+      .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
+      .slice(0, 3)
+    const expectedIds = ['cargo-a', 'cargo-b', 'cargo-c']
+
+    seeded.forEach((belt, index) => {
+      project.belts[belt.id].item = { id: expectedIds[index], shape: 'circle', age: 0 }
+      project.belts[belt.id].enteredTick = project.tick - 2
+    })
+
+    for (let tick = 0; tick < 24; tick += 1) {
+      project = runTick(project).project
+      const actualIds = Object.values(project.belts)
+        .flatMap((runtime) => runtime.item ? [runtime.item.id] : [])
+        .sort()
+      expect(actualIds).toEqual([...expectedIds].sort())
+    }
+  })
   it('rotates belt direction clockwise', () => {
     expect(rotateDirection('north')).toBe('east')
     expect(rotateDirection('east')).toBe('south')

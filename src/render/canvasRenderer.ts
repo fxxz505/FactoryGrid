@@ -3,6 +3,9 @@ import type { AreaPreview, BeltPreview, Direction, FactoryEntity, FactoryProject
 import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite, type BeltSpritePlan, type MachineGeometryStyle, type MachinePort } from './factoryAssets'
 
 export const CELL = 46
+export const BELT_ITEM_RADIUS = 10.5
+const INPUT_PORT_COLOR = '#86bd73'
+const OUTPUT_PORT_COLOR = '#6fa9c8'
 export const DEFAULT_VIEWPORT: ViewportState = { x: 130, y: 88, zoom: 1 }
 
 export interface CanvasSelection {
@@ -83,6 +86,40 @@ export function renderFactoryDynamicCanvas(
   renderDynamicItems(ctx, project, renderAlpha, scene)
 }
 
+export function renderFactoryMachineOverlayCanvas(
+  canvas: HTMLCanvasElement,
+  project: FactoryProject,
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+): void {
+  const ctx = prepareCanvas(canvas, project)
+  if (!ctx) return
+  const viewport = project.viewport ?? DEFAULT_VIEWPORT
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
+  scene.visible
+    .filter((entity) => entity.kind !== 'belt')
+    .forEach((entity) => drawMachineOccluder(ctx, entity, viewport))
+}
+
+function drawMachineOccluder(ctx: CanvasRenderingContext2D, entity: FactoryEntity, viewport: ViewportState): void {
+  const screen = gridToScreen(entity.position, viewport)
+  const scale = viewport.zoom
+  const size = CELL * scale
+  const style = machineGeometryFor(entity.type)
+  const body = size * 0.68 * style.scale
+  const bodyX = screen.x + (size - body) / 2
+  const bodyY = screen.y + (size - body) / 2
+
+  ctx.save()
+  roundedRectPath(ctx, bodyX, bodyY, body, body, 6 * scale)
+  ctx.fillStyle = style.body
+  ctx.fill()
+  ctx.strokeStyle = style.rim
+  ctx.lineWidth = 2 * scale
+  ctx.stroke()
+  drawMachineCore(ctx, style, screen.x + size / 2, screen.y + size / 2, body, scale, entity.direction)
+  ctx.restore()
+}
+
 export function renderFactoryCanvas(canvas: HTMLCanvasElement, project: FactoryProject, selection: CanvasSelection): void {
   const scene = createFactoryRenderScene(canvas, project)
   renderFactoryStaticCanvas(canvas, project, selection, scene)
@@ -112,22 +149,24 @@ function renderDynamicItems(
   scene: FactoryRenderScene
 ): void {
   const viewport = project.viewport ?? DEFAULT_VIEWPORT
-  const radius = 10.5 * viewport.zoom
+  const radius = BELT_ITEM_RADIUS * viewport.zoom
   const groups = new Map<ShapeId, Array<{ x: number; y: number }>>()
 
   scene.belts.forEach((entity) => {
     const runtime = project.belts[entity.id]
-    const item = runtime?.item
-    if (!item) return
     const screen = gridToScreen(entity.position, viewport)
     const size = CELL * viewport.zoom
-    const point = beltItemPoint(project, entity, screen.x, screen.y, size, renderAlpha, scene.beltInputs.get(entity.id))
-    const points = groups.get(item.shape)
-    if (points) points.push(point)
-    else groups.set(item.shape, [point])
+    const input = scene.beltInputs.get(entity.id)
+    if (runtime?.item) addShapePoint(groups, runtime.item.shape, beltItemPoint(project, entity, screen.x, screen.y, size, renderAlpha, input))
   })
 
   groups.forEach((points, shape) => drawShapeBatch(ctx, shape, points, radius))
+}
+
+function addShapePoint(groups: Map<ShapeId, Array<{ x: number; y: number }>>, shape: ShapeId, point: { x: number; y: number }): void {
+  const points = groups.get(shape)
+  if (points) points.push(point)
+  else groups.set(shape, [point])
 }
 
 function drawShapeBatch(
@@ -453,18 +492,28 @@ function beltItemPoint(
   const enteredTick = runtime?.enteredTick ?? runtime?.lastMovedTick ?? project.tick
   const ticksOnBelt = Math.max(0, project.tick - enteredTick)
   const progress = clamp01((ticksOnBelt + beltFrameProgress(project, renderAlpha)) / beltMoveInterval(entity))
-  const input = cachedInput ?? beltInputDirection(project, entity)
-  const output = entity.direction
+  const input = cachedInput ?? resolveBeltInputDirection(project, entity)
+  return beltPathPoint(x, y, size, input, entity.direction, progress)
+}
+
+export function beltPathPoint(
+  x: number,
+  y: number,
+  size: number,
+  input: Direction,
+  output: Direction,
+  progress: number
+): { x: number; y: number } {
   const from = edgePoint(x, y, size, input)
   const center = { x: x + size / 2, y: y + size / 2 }
   const to = edgePoint(x, y, size, output)
+  const t = clamp01(progress)
 
-  if (input === output) return lerpPoint(center, to, progress)
-  if (input === oppositeDirection(output)) return lerpPoint(from, to, progress)
-  if (progress < 0.5) return lerpPoint(from, center, progress / 0.5)
-  return lerpPoint(center, to, (progress - 0.5) / 0.5)
+  if (input === output) return lerpPoint(center, to, t)
+  if (input === oppositeDirection(output)) return lerpPoint(from, to, t)
+  if (t < 0.5) return lerpPoint(from, center, t / 0.5)
+  return lerpPoint(center, to, (t - 0.5) / 0.5)
 }
-
 function beltMoveInterval(entity: FactoryEntity): number {
   return entity.type === 'fast-belt' ? 1 : 2
 }
@@ -474,14 +523,36 @@ function beltFrameProgress(project: FactoryProject, renderAlpha = 0): number {
   return clamp01(renderAlpha)
 }
 
-function beltInputDirection(project: FactoryProject, entity: FactoryEntity, entityIndex?: Map<string, FactoryEntity>): Direction {
-  const opposite = oppositeDirection(entity.direction)
-  const backPosition = offsetPosition(entity.position, opposite)
-  const back = entityIndex?.get(positionKey(backPosition)) ?? entityAtCell(project, backPosition)
-  if (back && (back.type === 'belt' || back.kind !== 'belt')) return opposite
-  const connections = entityConnectionDirections(project, entity).filter((direction) => direction !== entity.direction)
-  return connections[0] ?? opposite
+export function resolveBeltInputDirection(
+  project: FactoryProject,
+  entity: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): Direction {
+  const index = entityIndex ?? new Map(project.entities.map((candidate) => [positionKey(candidate.position), candidate]))
+  const incoming = directions().find((direction) => {
+    if (direction === entity.direction) return false
+    const neighbor = index.get(positionKey(offsetPosition(entity.position, direction)))
+    return !!neighbor && canFeedPosition(neighbor, entity.position, oppositeDirection(direction))
+  })
+  return incoming ?? oppositeDirection(entity.direction)
 }
+
+function beltInputDirection(project: FactoryProject, entity: FactoryEntity, entityIndex?: Map<string, FactoryEntity>): Direction {
+  return resolveBeltInputDirection(project, entity, entityIndex)
+}
+
+function canFeedPosition(entity: FactoryEntity, position: GridPosition, portDirection: Direction): boolean {
+  if (entity.kind === 'belt') {
+    const next = offsetPosition(entity.position, entity.direction)
+    return next.x === position.x && next.y === position.y
+  }
+  return machinePortRoles(entity).some((port) => port.role === 'output' && port.direction === portDirection)
+}
+
+function directions(): Direction[] {
+  return ['north', 'east', 'south', 'west']
+}
+
 function edgePoint(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
   const inset = size * 0.03
   if (direction === 'east') return { x: x + size - inset, y: y + size / 2 }
@@ -549,43 +620,94 @@ function drawMachineConnector(ctx: CanvasRenderingContext2D, project: FactoryPro
   ctx.strokeStyle = '#9ea5a9'
   ctx.lineWidth = Math.max(1.2, size * 0.03)
   directions.forEach((direction) => drawConnectorRail(ctx, cx, cy, x, y, size, direction, track))
-  drawMachinePortCaps(ctx, ports, x, y, size)
+  drawMachinePortHousings(ctx, ports, x, y, size, track)
   ctx.restore()
 }
 
-function drawMachinePortCaps(ctx: CanvasRenderingContext2D, ports: MachinePort[], x: number, y: number, size: number): void {
+function drawMachinePortHousings(
+  ctx: CanvasRenderingContext2D,
+  ports: MachinePort[],
+  x: number,
+  y: number,
+  size: number,
+  track: number
+): void {
+  const length = size * 0.34
+  const thickness = track * 0.52
+
   ports.forEach((port) => {
-    const center = portCapCenter(x, y, size, port.direction)
-    const long = port.role === 'output' ? size * 0.26 : size * 0.18
-    const short = port.role === 'output' ? size * 0.12 : size * 0.16
+    const center = portHousingCenter(x, y, size, port.direction)
     ctx.save()
     ctx.translate(center.x, center.y)
     ctx.rotate(directionToRotation(port.direction))
-    ctx.fillStyle = port.role === 'output' ? '#f7f1e6' : '#879196'
-    ctx.strokeStyle = port.role === 'output' ? '#9ba3a6' : '#687277'
-    ctx.lineWidth = Math.max(1, size * 0.018)
-    roundedRectPath(ctx, -long / 2, -short / 2, long, short, size * 0.025)
-    ctx.fill()
-    ctx.stroke()
-    if (port.role === 'input') {
-      ctx.fillStyle = 'rgba(38,52,59,0.24)'
-      ctx.fillRect(-long * 0.32, -short * 0.16, long * 0.64, short * 0.32)
-    } else {
-      ctx.fillStyle = 'rgba(208,112,72,0.22)'
-      ctx.fillRect(long * 0.08, -short * 0.22, long * 0.28, short * 0.44)
-    }
+    drawMachinePortHousing(ctx, length, thickness, port.role)
     ctx.restore()
   })
 }
 
-function portCapCenter(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
-  const inset = size * 0.11
-  if (direction === 'east') return { x: x + size - inset, y: y + size / 2 }
-  if (direction === 'west') return { x: x + inset, y: y + size / 2 }
-  if (direction === 'south') return { x: x + size / 2, y: y + size - inset }
-  return { x: x + size / 2, y: y + inset }
+function drawMachinePortHousing(
+  ctx: CanvasRenderingContext2D,
+  length: number,
+  thickness: number,
+  role: MachinePort['role']
+): void {
+  ctx.beginPath()
+  ctx.moveTo(-length * 0.52, -thickness * 0.42)
+  ctx.lineTo(length * 0.28, -thickness * 0.36)
+  ctx.lineTo(length * 0.5, -thickness * 0.2)
+  ctx.lineTo(length * 0.5, thickness * 0.2)
+  ctx.lineTo(length * 0.28, thickness * 0.36)
+  ctx.lineTo(-length * 0.52, thickness * 0.42)
+  ctx.closePath()
+  ctx.fillStyle = '#667176'
+  ctx.fill()
+  ctx.strokeStyle = '#4d595e'
+  ctx.lineWidth = Math.max(1, thickness * 0.1)
+  ctx.stroke()
+
+  ctx.beginPath()
+  ctx.moveTo(-length * 0.34, -thickness * 0.26)
+  ctx.lineTo(length * 0.2, -thickness * 0.23)
+  ctx.lineTo(length * 0.35, -thickness * 0.12)
+  ctx.lineTo(length * 0.35, thickness * 0.12)
+  ctx.lineTo(length * 0.2, thickness * 0.23)
+  ctx.lineTo(-length * 0.34, thickness * 0.26)
+  ctx.closePath()
+  ctx.fillStyle = 'rgba(255, 255, 252, 0.08)'
+  ctx.fill()
+
+  drawPortDirectionTriangle(ctx, length, thickness, role)
 }
 
+function drawPortDirectionTriangle(
+  ctx: CanvasRenderingContext2D,
+  length: number,
+  thickness: number,
+  role: MachinePort['role']
+): void {
+  const direction = role === 'input' ? -1 : 1
+  const centerX = role === 'input' ? -length * 0.02 : length * 0.04
+  const halfLength = length * 0.25
+  const halfHeight = thickness * 0.28
+
+  ctx.beginPath()
+  ctx.moveTo(centerX + direction * halfLength, 0)
+  ctx.lineTo(centerX - direction * halfLength, -halfHeight)
+  ctx.lineTo(centerX - direction * halfLength, halfHeight)
+  ctx.closePath()
+  ctx.fillStyle = role === 'input' ? INPUT_PORT_COLOR : OUTPUT_PORT_COLOR
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(42, 54, 58, 0.42)'
+  ctx.lineWidth = Math.max(0.7, thickness * 0.045)
+  ctx.stroke()
+}
+
+function portHousingCenter(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
+  if (direction === 'east') return { x: x + size, y: y + size / 2 }
+  if (direction === 'west') return { x, y: y + size / 2 }
+  if (direction === 'south') return { x: x + size / 2, y: y + size }
+  return { x: x + size / 2, y }
+}
 function drawConnectorArm(ctx: CanvasRenderingContext2D, cx: number, cy: number, x: number, y: number, size: number, direction: Direction, track: number): void {
   const overlap = Math.max(1, size * 0.025)
   if (direction === 'east') ctx.fillRect(cx - overlap, cy - track / 2, x + size - cx + overlap * 2, track)

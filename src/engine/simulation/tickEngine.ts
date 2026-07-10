@@ -596,7 +596,10 @@ function incomingDirection(from: FactoryEntity, to: FactoryEntity): Direction | 
 
 function pointsToInput(index: EntityIndex, belt: FactoryEntity, incoming: Direction): boolean {
   const neighbor = entityAt(index, nextPosition(belt.position, incoming))
-  return Boolean(neighbor && neighbor.direction === oppositeDirection(incoming))
+  if (!neighbor) return false
+  const outputDirection = oppositeDirection(incoming)
+  if (neighbor.kind === 'belt') return neighbor.direction === outputDirection
+  return machinePortRoles(neighbor).some((port) => port.role === 'output' && port.direction === outputDirection)
 }
 
 

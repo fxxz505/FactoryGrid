@@ -28,6 +28,7 @@
         @contextmenu.prevent="onDelete"
       ></canvas>
       <canvas ref="dynamicCanvasRef" class="factory-canvas-dynamic" aria-hidden="true"></canvas>
+      <canvas ref="machineOverlayCanvasRef" class="factory-canvas-dynamic factory-canvas-machine-overlay" aria-hidden="true"></canvas>
     </div>
   </div>
 </template>
@@ -37,7 +38,7 @@ import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import type { AreaPreview, BeltPreview, Direction, FactoryProject, GridPosition, ViewportState } from '../../models/factory'
 import { beltRoute, tunnelRoute } from '../../engine/simulation/editorActions'
 import {
-  createFactoryRenderScene, entityAtPoint, renderFactoryDynamicCanvas,
+  createFactoryRenderScene, entityAtPoint, renderFactoryDynamicCanvas, renderFactoryMachineOverlayCanvas,
   renderFactoryStaticCanvas, screenToGrid, type FactoryRenderScene
 } from '../../render/canvasRenderer'
 
@@ -56,6 +57,7 @@ const emit = defineEmits<{
 
 const staticCanvasRef = ref<HTMLCanvasElement>()
 const dynamicCanvasRef = ref<HTMLCanvasElement>()
+const machineOverlayCanvasRef = ref<HTMLCanvasElement>()
 const hoverCell = ref<GridPosition>()
 const dragStart = ref<GridPosition>()
 const dragEnd = ref<GridPosition>()
@@ -112,6 +114,8 @@ function paintStatic(): void {
   const project = toRaw(props.project)
   scene = createFactoryRenderScene(canvas, project)
   renderFactoryStaticCanvas(canvas, project, selectionState(), scene)
+  const overlayCanvas = machineOverlayCanvasRef.value
+  if (overlayCanvas) renderFactoryMachineOverlayCanvas(overlayCanvas, project, scene)
 }
 
 function scheduleStaticPaint(): void {

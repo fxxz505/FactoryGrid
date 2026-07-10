@@ -4,6 +4,7 @@ import { buildBeltLine } from '../../src/engine/simulation/editorActions'
 import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite } from '../../src/render/factoryAssets'
 import { buildings } from '../../src/data/machines'
 import type { FactoryEntity } from '../../src/models/factory'
+import { BELT_ITEM_RADIUS, beltPathPoint, resolveBeltInputDirection } from '../../src/render/canvasRenderer'
 
 describe('factory geometric rendering contract', () => {
   it('maps every available machine to a local geometric style instead of image assets', () => {
@@ -53,6 +54,45 @@ describe('factory geometric rendering contract', () => {
     expect(plan.kind).toBe('corner')
     expect(plan.direction).toBe('south')
     expect(plan.connections).toEqual(['south', 'west'])
+  })
+
+  it('uses the belt that actually points into a corner as its visual input', () => {
+    const project = createShapezProject()
+    project.entities = [
+      { id: 'corner', kind: 'belt', type: 'belt', label: 'corner', position: { x: 1, y: 1 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' },
+      { id: 'upstream', kind: 'belt', type: 'belt', label: 'upstream', position: { x: 1, y: 0 }, direction: 'south', input: [], output: [], progress: 0, status: 'idle' },
+      { id: 'unrelated', kind: 'belt', type: 'belt', label: 'unrelated', position: { x: 0, y: 1 }, direction: 'west', input: [], output: [], progress: 0, status: 'idle' }
+    ]
+
+    expect(resolveBeltInputDirection(project, project.entities[0])).toBe('north')
+  })
+
+  it('uses a splitter side output as the input of a turning belt', () => {
+    const project = createShapezProject()
+    project.entities = [
+      { id: 'corner', kind: 'belt', type: 'belt', label: 'corner', position: { x: 1, y: 1 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' },
+      { id: 'splitter', kind: 'processor', type: 'splitter', label: 'splitter', position: { x: 1, y: 2 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }
+    ]
+
+    expect(resolveBeltInputDirection(project, project.entities[0])).toBe('south')
+  })
+
+  it('keeps corner cargo on a continuous curved path inside the belt cell', () => {
+    const before = beltPathPoint(0, 0, 46, 'north', 'east', 0.49)
+    const after = beltPathPoint(0, 0, 46, 'north', 'east', 0.51)
+    const end = beltPathPoint(0, 0, 46, 'north', 'east', 1)
+
+    expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(2)
+    expect(end.x).toBeGreaterThan(44)
+    expect(end.y).toBe(23)
+  })
+
+  it('keeps equal progress steps visually even around a corner', () => {
+    const points = [0, 0.25, 0.5, 0.75, 1].map((progress) => beltPathPoint(0, 0, 46, 'north', 'east', progress))
+    const distances = points.slice(1).map((point, index) => Math.hypot(point.x - points[index].x, point.y - points[index].y))
+
+    expect(Math.max(...distances) - Math.min(...distances)).toBeLessThan(1.5)
+    expect(BELT_ITEM_RADIUS).toBe(10.5)
   })
 
   it('exposes furnace and assembler as multi-port machines with input and output roles', () => {
