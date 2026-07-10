@@ -1,4 +1,4 @@
-export type ShapeId =
+﻿export type ShapeId =
   | 'circle'
   | 'square'
   | 'star'
@@ -8,9 +8,12 @@ export type ShapeId =
   | 'copper-ore'
   | 'iron-ingot'
   | 'copper-ingot'
+  | 'iron-plate'
+  | 'steel'
   | 'iron-gear'
   | 'copper-wire'
   | 'circuit'
+  | 'motor'
   | 'half-circle'
   | 'half-square'
   | 'circle-red'
@@ -32,6 +35,7 @@ export type BuildingType =
   | 'source-coal'
   | 'source-copper'
   | 'belt'
+  | 'fast-belt'
   | 'splitter'
   | 'merger'
   | 'tunnel'
@@ -49,11 +53,18 @@ export type BuildingType =
 
 export type Direction = 'north' | 'east' | 'south' | 'west'
 export type EntityStatus = 'idle' | 'running' | 'waiting' | 'blocked' | 'delivering'
-export type ToolId = BuildingType | 'select' | 'pan' | 'delete'
+export type AreaTool = 'copy-area' | 'paste-blueprint' | 'delete-area' | 'upgrade-area'
+export type ToolId = BuildingType | 'select' | 'pan' | 'delete' | AreaTool
+export type RenderQuality = 'high' | 'performance'
 
 export interface GridPosition {
   x: number
   y: number
+}
+
+export interface GridArea {
+  start: GridPosition
+  end: GridPosition
 }
 
 export interface ShapeDefinition {
@@ -85,8 +96,10 @@ export interface RecipeDefinition {
   machine: 'furnace' | 'assembler'
   inputs: RecipeIngredient[]
   output: ShapeId
+  outputAmount?: number
   durationTicks: number
   description: string
+  requiredResearch?: string
 }
 
 export interface ShapeItem {
@@ -104,6 +117,7 @@ export interface FactoryEntity {
   direction: Direction
   sourceShape?: ShapeId
   recipeId?: string
+  level?: number
   input: ShapeItem[]
   output: ShapeItem[]
   progress: number
@@ -128,6 +142,12 @@ export interface BeltPreview {
   direction: Direction
   valid: boolean
   tool?: 'belt' | 'tunnel'
+}
+
+export interface AreaPreview {
+  start: GridPosition
+  end: GridPosition
+  mode: 'copy' | 'delete' | 'upgrade'
 }
 
 export interface FactoryError {
@@ -159,12 +179,53 @@ export interface DeliveryGoal {
   delivered: number
 }
 
+export interface BlueprintEntity {
+  type: BuildingType
+  offset: GridPosition
+  direction: Direction
+  recipeId?: string
+  level?: number
+}
+
 export interface Blueprint {
   id: string
   name: string
   description: string
-  entityIds: string[]
+  entityIds?: string[]
+  entities: BlueprintEntity[]
+  width: number
+  height: number
   createdAt: string
+}
+
+export interface ResearchRequirement {
+  shape: ShapeId
+  amount: number
+}
+
+export interface ResearchDefinition {
+  id: string
+  name: string
+  description: string
+  cost: number
+  prerequisites: string[]
+  requirements: ResearchRequirement[]
+  unlockBuildings?: BuildingType[]
+  unlockRecipes?: string[]
+  maxMachineLevel?: number
+}
+
+export interface ResearchState {
+  points: number
+  delivered: Partial<Record<ShapeId, number>>
+  completed: string[]
+  maxMachineLevel: number
+}
+
+export interface FactoryPerformance {
+  fps: number
+  frameTime: number
+  quality: RenderQuality
 }
 
 export interface FactoryProject {
@@ -183,6 +244,8 @@ export interface FactoryProject {
   entities: FactoryEntity[]
   belts: Record<string, BeltRuntime>
   metrics: FactoryMetrics
+  research: ResearchState
+  performance: FactoryPerformance
   errors: FactoryError[]
   events: SimulationEvent[]
   blueprints: Blueprint[]

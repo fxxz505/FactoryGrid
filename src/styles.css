@@ -111,11 +111,14 @@ button { cursor: pointer; }
 .canvas-legend { flex: 0 0 auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .canvas-legend i { width: 8px; height: 8px; display: inline-block; border-radius: 999px; margin-right: 5px; }
 .canvas-legend .ok { background: #16857a; } .canvas-legend .warn { background: #b58a2a; } .canvas-legend .bad { background: #e05252; }
-.factory-canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+.factory-canvas-stage { position: relative; min-height: 0; overflow: hidden; }
+.factory-canvas, .factory-canvas-dynamic { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.factory-canvas { cursor: crosshair; touch-action: none; }
+.factory-canvas-dynamic { pointer-events: none; }
 .factory-canvas.panning { cursor: grabbing; }
 .factory-canvas.previewing { cursor: copy; }
 
-.simulation-bar { display: grid; grid-template-columns: 120px 120px 100px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 12px; }
+.simulation-bar { display: grid; grid-template-columns: 90px 90px 80px 220px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 12px; }
 .simulation-bar strong { display: block; color: #647278; font-size: 11px; text-transform: uppercase; }
 .simulation-bar span { display: block; overflow: hidden; color: #26343b; font-size: 14px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -198,3 +201,27 @@ button { cursor: pointer; }
 .recipe-shapes b { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
 .recipe-choice strong { display: block; font-size: 13px; }
 .recipe-choice small { display: block; margin-top: 4px; color: #647278; font-size: 12px; line-height: 1.38; }
+.tool-row:disabled { cursor: not-allowed; opacity: 0.5; transform: none; }
+.area-tools .tool-row { margin-bottom: 7px; }
+.blueprint-card.active { border-color: #16857a; background: #e8faf4; }
+
+.research-node {
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(38,52,59,0.12);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+.research-node.completed { border-color: rgba(22,133,122,0.42); background: #e8faf4; }
+.research-node.locked { opacity: 0.58; }
+.research-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.research-title strong { font-size: 13px; }
+.research-title span { color: #16857a; font-size: 11px; font-weight: 900; }
+.research-node p { margin: 5px 0 8px; color: #647278; font-size: 11px; line-height: 1.45; }
+.research-requirements { display: flex; gap: 5px; flex-wrap: wrap; }
+.research-requirements span { padding: 3px 6px; border-radius: 5px; background: rgba(38,52,59,0.07); color: #46565d; font-size: 10px; font-weight: 800; }
+
+.machine-icon.fast-belt .icon-core { width: 24px; height: 10px; border-radius: 2px; background: #6da69f; }
+.performance-readout.good span { color: #16857a; }
+.performance-readout.warn span { color: #a9821f; }
+.performance-readout.bad span { color: #c64f48; }

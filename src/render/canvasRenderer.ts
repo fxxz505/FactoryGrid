@@ -1,5 +1,5 @@
 import { shapeById } from '../data/resources'
-import type { BeltPreview, Direction, FactoryEntity, FactoryProject, GridPosition, ShapeId, ViewportState } from '../models/factory'
+import type { AreaPreview, BeltPreview, Direction, FactoryEntity, FactoryProject, GridPosition, ShapeId, ViewportState } from '../models/factory'
 import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite, type BeltSpritePlan, type MachineGeometryStyle, type MachinePort } from './factoryAssets'
 
 export const CELL = 46
@@ -9,6 +9,7 @@ export interface CanvasSelection {
   selectedEntityId?: string
   hoverCell?: GridPosition
   preview?: BeltPreview
+  areaPreview?: AreaPreview
 }
 
 
@@ -31,30 +32,213 @@ export function entityAtPoint(project: FactoryProject, point: { x: number; y: nu
   return project.entities.find((entity) => entity.position.x === cell.x && entity.position.y === cell.y)
 }
 
-export function renderFactoryCanvas(canvas: HTMLCanvasElement, project: FactoryProject, selection: CanvasSelection): void {
-  const ctx = canvas.getContext('2d')
+export interface FactoryRenderScene {
+  visible: FactoryEntity[]
+  belts: FactoryEntity[]
+  visibleIds: Set<string>
+  entityIndex: Map<string, FactoryEntity>
+  beltPlans: Map<string, BeltSpritePlan>
+  beltInputs: Map<string, Direction>
+}
+
+export function createFactoryRenderScene(canvas: HTMLCanvasElement, project: FactoryProject): FactoryRenderScene {
+  const viewport = project.viewport ?? DEFAULT_VIEWPORT
+  const visible = visibleEntities(project, canvas.clientWidth, canvas.clientHeight, viewport)
+  const belts = visible.filter((entity) => entity.kind === 'belt')
+  const entityIndex = new Map(project.entities.map((entity) => [positionKey(entity.position), entity]))
+  const beltPlans = new Map(belts.map((entity) => [entity.id, planBeltSprite(project, entity)]))
+  const beltInputs = new Map(belts.map((entity) => [entity.id, beltInputDirection(project, entity, entityIndex)]))
+  return { visible, belts, visibleIds: new Set(visible.map((entity) => entity.id)), entityIndex, beltPlans, beltInputs }
+}
+
+export function renderFactoryStaticCanvas(
+  canvas: HTMLCanvasElement,
+  project: FactoryProject,
+  selection: CanvasSelection,
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+): void {
+  const ctx = prepareCanvas(canvas, project)
   if (!ctx) return
-  const ratio = window.devicePixelRatio || 1
-  const width = canvas.clientWidth * ratio
-  const height = canvas.clientHeight * ratio
+  const viewport = project.viewport ?? DEFAULT_VIEWPORT
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
+  drawGrid(ctx, canvas.clientWidth, canvas.clientHeight, viewport, selection.hoverCell)
+  drawTunnelLinks(ctx, project, viewport, scene.visibleIds)
+  if (selection.preview) drawBeltPreview(ctx, viewport, selection.preview)
+  if (selection.areaPreview) drawAreaPreview(ctx, viewport, selection.areaPreview)
+  scene.belts.forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
+  scene.visible
+    .filter((entity) => entity.kind !== 'belt')
+    .forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
+}
+
+export function renderFactoryDynamicCanvas(
+  canvas: HTMLCanvasElement,
+  project: FactoryProject,
+  renderAlpha: number,
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+): void {
+  const ctx = prepareCanvas(canvas, project)
+  if (!ctx) return
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
+  renderDynamicItems(ctx, project, renderAlpha, scene)
+}
+
+export function renderFactoryCanvas(canvas: HTMLCanvasElement, project: FactoryProject, selection: CanvasSelection): void {
+  const scene = createFactoryRenderScene(canvas, project)
+  renderFactoryStaticCanvas(canvas, project, selection, scene)
+  const ctx = canvas.getContext('2d')
+  if (ctx) renderDynamicItems(ctx, project, 0, scene)
+}
+
+function prepareCanvas(canvas: HTMLCanvasElement, project: FactoryProject): CanvasRenderingContext2D | undefined {
+  const ctx = canvas.getContext('2d') ?? undefined
+  if (!ctx) return undefined
+  const ratioCap = project.performance?.quality === 'performance' ? 1.25 : 2
+  const ratio = Math.min(window.devicePixelRatio || 1, ratioCap)
+  const width = Math.round(canvas.clientWidth * ratio)
+  const height = Math.round(canvas.clientHeight * ratio)
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width
     canvas.height = height
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
-  const viewport = project.viewport ?? DEFAULT_VIEWPORT
-  drawGrid(ctx, canvas.clientWidth, canvas.clientHeight, viewport, selection.hoverCell)
-  drawTunnelLinks(ctx, project, viewport)
-  if (selection.preview) drawBeltPreview(ctx, viewport, selection.preview)
-  const belts = project.entities.filter((entity) => entity.type === 'belt')
-  belts.forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport))
-  project.entities
-    .filter((entity) => entity.type !== 'belt')
-    .forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport))
-  belts.forEach((entity) => drawBeltItem(ctx, project, entity, viewport))
+  return ctx
 }
 
+function renderDynamicItems(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  renderAlpha: number,
+  scene: FactoryRenderScene
+): void {
+  const viewport = project.viewport ?? DEFAULT_VIEWPORT
+  const radius = 10.5 * viewport.zoom
+  const groups = new Map<ShapeId, Array<{ x: number; y: number }>>()
+
+  scene.belts.forEach((entity) => {
+    const runtime = project.belts[entity.id]
+    const item = runtime?.item
+    if (!item) return
+    const screen = gridToScreen(entity.position, viewport)
+    const size = CELL * viewport.zoom
+    const point = beltItemPoint(project, entity, screen.x, screen.y, size, renderAlpha, scene.beltInputs.get(entity.id))
+    const points = groups.get(item.shape)
+    if (points) points.push(point)
+    else groups.set(item.shape, [point])
+  })
+
+  groups.forEach((points, shape) => drawShapeBatch(ctx, shape, points, radius))
+}
+
+function drawShapeBatch(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeId,
+  points: Array<{ x: number; y: number }>,
+  radius: number
+): void {
+  const def = shapeById[shape]
+  if (!def) return
+  ctx.save()
+  ctx.fillStyle = def.color
+  ctx.strokeStyle = 'rgba(38,52,59,0.28)'
+  ctx.lineWidth = Math.max(1, radius * 0.09)
+  ctx.beginPath()
+  points.forEach((point) => appendShapePath(ctx, shape, point.x, point.y, radius))
+  ctx.fill()
+  ctx.stroke()
+
+  if (def.accent && shouldUseShapeAccent(shape)) {
+    points.forEach((point) => drawShape(ctx, shape, point.x, point.y, radius))
+  }
+  ctx.restore()
+}
+
+function appendShapePath(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: number, radius: number): void {
+  if (isBasicCircleShape(shape) || shape.includes('circle')) {
+    ctx.moveTo(x + radius, y)
+    ctx.arc(x, y, radius, 0, Math.PI * 2)
+    return
+  }
+  if (isBasicTriangleShape(shape)) {
+    ctx.moveTo(x, y - radius * 1.2)
+    ctx.lineTo(x + radius * 1.12, y + radius * 0.9)
+    ctx.lineTo(x - radius * 1.12, y + radius * 0.9)
+    ctx.closePath()
+    return
+  }
+  if (shape.includes('square')) {
+    ctx.rect(x - radius, y - radius, radius * 2, radius * 2)
+    return
+  }
+  if (shape.includes('diamond')) {
+    ctx.moveTo(x, y - radius * 1.25)
+    ctx.lineTo(x + radius * 1.25, y)
+    ctx.lineTo(x, y + radius * 1.25)
+    ctx.lineTo(x - radius * 1.25, y)
+    ctx.closePath()
+    return
+  }
+  if (shape.includes('star')) {
+    appendStarPath(ctx, x, y, radius)
+    return
+  }
+  ctx.moveTo(x + radius, y)
+  ctx.arc(x, y, radius, 0, Math.PI * 2)
+}
+
+function appendStarPath(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number): void {
+  for (let index = 0; index < 10; index += 1) {
+    const angle = -Math.PI / 2 + index * Math.PI / 5
+    const pointRadius = index % 2 === 0 ? radius : radius * 0.45
+    const px = x + Math.cos(angle) * pointRadius
+    const py = y + Math.sin(angle) * pointRadius
+    if (index === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
+  }
+  ctx.closePath()
+}
+function visibleGridBounds(width: number, height: number, viewport: ViewportState): { minX: number; maxX: number; minY: number; maxY: number } {
+  const step = CELL * viewport.zoom
+  return {
+    minX: Math.floor(-viewport.x / step) - 1,
+    maxX: Math.ceil((width - viewport.x) / step) + 1,
+    minY: Math.floor(-viewport.y / step) - 1,
+    maxY: Math.ceil((height - viewport.y) / step) + 1
+  }
+}
+
+function visibleEntities(project: FactoryProject, width: number, height: number, viewport: ViewportState): FactoryEntity[] {
+  const bounds = visibleGridBounds(width, height, viewport)
+  return project.entities.filter((entity) => (
+    entity.position.x >= bounds.minX && entity.position.x <= bounds.maxX
+    && entity.position.y >= bounds.minY && entity.position.y <= bounds.maxY
+  ))
+}
+
+function drawAreaPreview(ctx: CanvasRenderingContext2D, viewport: ViewportState, preview: AreaPreview): void {
+  const minX = Math.min(preview.start.x, preview.end.x)
+  const maxX = Math.max(preview.start.x, preview.end.x)
+  const minY = Math.min(preview.start.y, preview.end.y)
+  const maxY = Math.max(preview.start.y, preview.end.y)
+  const screen = gridToScreen({ x: minX, y: minY }, viewport)
+  const step = CELL * viewport.zoom
+  const width = (maxX - minX + 1) * step
+  const height = (maxY - minY + 1) * step
+  const colors = {
+    copy: ['rgba(23, 128, 112, 0.16)', '#178070'],
+    delete: ['rgba(198, 79, 72, 0.16)', '#c64f48'],
+    upgrade: ['rgba(202, 166, 57, 0.18)', '#a9821f']
+  } as const
+  const [fill, stroke] = colors[preview.mode]
+  ctx.save()
+  ctx.fillStyle = fill
+  ctx.strokeStyle = stroke
+  ctx.lineWidth = Math.max(2, 2 * viewport.zoom)
+  ctx.setLineDash([7 * viewport.zoom, 5 * viewport.zoom])
+  ctx.fillRect(screen.x, screen.y, width, height)
+  ctx.strokeRect(screen.x, screen.y, width, height)
+  ctx.restore()
+}
 function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number, viewport: ViewportState, hover?: GridPosition): void {
   const bg = ctx.createLinearGradient(0, 0, width, height)
   bg.addColorStop(0, '#edf0e9')
@@ -148,6 +332,8 @@ function previewProject(preview: BeltPreview): FactoryProject {
     })),
     belts: {},
     metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+    research: { points: 0, delivered: {}, completed: [], maxMachineLevel: 1 },
+    performance: { fps: 60, frameTime: 16.7, quality: 'high' },
     errors: [],
     events: [],
     blueprints: [],
@@ -155,9 +341,10 @@ function previewProject(preview: BeltPreview): FactoryProject {
   }
 }
 
-function drawTunnelLinks(ctx: CanvasRenderingContext2D, project: FactoryProject, viewport: ViewportState): void {
+function drawTunnelLinks(ctx: CanvasRenderingContext2D, project: FactoryProject, viewport: ViewportState, visibleIds?: Set<string>): void {
   const handled = new Set<string>()
   project.entities.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
+    if (visibleIds && !visibleIds.has(entrance.id)) return
     if (handled.has(entrance.id)) return
     const exit = findTunnelExit(project, entrance)
     if (!exit || handled.has(exit.id)) return
@@ -201,7 +388,7 @@ function findTunnelExit(project: FactoryProject, entrance: FactoryEntity): Facto
   }
   return undefined
 }
-function drawEntity(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, selected: boolean, viewport: ViewportState): void {
+function drawEntity(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, selected: boolean, viewport: ViewportState, scene?: FactoryRenderScene): void {
   const screen = gridToScreen(entity.position, viewport)
   const scale = viewport.zoom
   const x = screen.x
@@ -209,7 +396,7 @@ function drawEntity(ctx: CanvasRenderingContext2D, project: FactoryProject, enti
   const size = CELL * scale
   ctx.save()
 
-  if (entity.type === 'belt') drawBelt(ctx, project, entity, x, y, size)
+  if (entity.kind === 'belt') drawBelt(ctx, project, entity, x, y, size, scene?.beltPlans.get(entity.id))
   else drawMachineAsset(ctx, project, entity, x, y, size, scale)
 
   if (selected) {
@@ -220,27 +407,33 @@ function drawEntity(ctx: CanvasRenderingContext2D, project: FactoryProject, enti
 
   ctx.restore()
 }
-function drawBelt(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, x: number, y: number, size: number): void {
-  const plan = planBeltSprite(project, entity)
-  drawBeltAsset(ctx, x, y, size, plan)
+function drawBelt(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  entity: FactoryEntity,
+  x: number,
+  y: number,
+  size: number,
+  cachedPlan?: BeltSpritePlan
+): void {
+  const plan = cachedPlan ?? planBeltSprite(project, entity)
+  drawBeltAsset(ctx, x, y, size, plan, entity.type === 'fast-belt')
 }
 
-function drawBeltItem(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, viewport: ViewportState): void {
-  const runtime = project.belts[entity.id]
-  const item = runtime?.item
-  if (!item) return
-  const screen = gridToScreen(entity.position, viewport)
-  const size = CELL * viewport.zoom
-  const point = beltItemPoint(project, entity, screen.x, screen.y, size)
-  drawShape(ctx, item.shape, point.x, point.y, 10.5 * viewport.zoom)
-}
-
-function beltItemPoint(project: FactoryProject, entity: FactoryEntity, x: number, y: number, size: number): { x: number; y: number } {
+function beltItemPoint(
+  project: FactoryProject,
+  entity: FactoryEntity,
+  x: number,
+  y: number,
+  size: number,
+  renderAlpha = 0,
+  cachedInput?: Direction
+): { x: number; y: number } {
   const runtime = project.belts[entity.id]
   const enteredTick = runtime?.enteredTick ?? runtime?.lastMovedTick ?? project.tick
   const ticksOnBelt = Math.max(0, project.tick - enteredTick)
-  const progress = clamp01(ticksOnBelt + beltFrameProgress(project))
-  const input = beltInputDirection(project, entity)
+  const progress = clamp01((ticksOnBelt + beltFrameProgress(project, renderAlpha)) / beltMoveInterval(entity))
+  const input = cachedInput ?? beltInputDirection(project, entity)
   const output = entity.direction
   const from = edgePoint(x, y, size, input)
   const center = { x: x + size / 2, y: y + size / 2 }
@@ -252,19 +445,23 @@ function beltItemPoint(project: FactoryProject, entity: FactoryEntity, x: number
   return lerpPoint(center, to, (progress - 0.5) / 0.5)
 }
 
-function beltFrameProgress(project: FactoryProject): number {
-  if (!project.running) return 0
-  return clamp01(project.renderAlpha ?? 0)
+function beltMoveInterval(entity: FactoryEntity): number {
+  return entity.type === 'fast-belt' ? 1 : 2
 }
 
-function beltInputDirection(project: FactoryProject, entity: FactoryEntity): Direction {
+function beltFrameProgress(project: FactoryProject, renderAlpha = 0): number {
+  if (!project.running) return 0
+  return clamp01(renderAlpha)
+}
+
+function beltInputDirection(project: FactoryProject, entity: FactoryEntity, entityIndex?: Map<string, FactoryEntity>): Direction {
   const opposite = oppositeDirection(entity.direction)
-  const back = entityAtCell(project, offsetPosition(entity.position, opposite))
+  const backPosition = offsetPosition(entity.position, opposite)
+  const back = entityIndex?.get(positionKey(backPosition)) ?? entityAtCell(project, backPosition)
   if (back && (back.type === 'belt' || back.kind !== 'belt')) return opposite
   const connections = entityConnectionDirections(project, entity).filter((direction) => direction !== entity.direction)
   return connections[0] ?? opposite
 }
-
 function edgePoint(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
   const inset = size * 0.03
   if (direction === 'east') return { x: x + size - inset, y: y + size / 2 }
@@ -475,7 +672,7 @@ function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometrySt
   }
 }
 
-function drawBeltAsset(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, plan: BeltSpritePlan): void {
+function drawBeltAsset(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, plan: BeltSpritePlan, fast = false): void {
   const track = size * 0.62
   const cx = x + size / 2
   const cy = y + size / 2
@@ -488,13 +685,13 @@ function drawBeltAsset(ctx: CanvasRenderingContext2D, x: number, y: number, size
   ctx.shadowBlur = size * 0.05
   ctx.shadowOffsetY = size * 0.03
 
-  ctx.fillStyle = '#bfc4c7'
+  ctx.fillStyle = fast ? '#78938f' : '#bfc4c7'
   connections.forEach((direction) => drawBeltArm(ctx, x, y, size, direction, track + size * 0.12))
   roundRect(ctx, cx - (track + size * 0.12) / 2, cy - (track + size * 0.12) / 2, track + size * 0.12, track + size * 0.12, size * 0.08)
   ctx.fill()
 
   ctx.shadowColor = 'transparent'
-  ctx.fillStyle = '#dfe3e5'
+  ctx.fillStyle = fast ? '#b8d1cc' : '#dfe3e5'
   connections.forEach((direction) => drawBeltArm(ctx, x, y, size, direction, track))
   roundRect(ctx, cx - track / 2, cy - track / 2, track, track, size * 0.07)
   ctx.fill()
@@ -619,6 +816,9 @@ function cellCenter(position: GridPosition, viewport: ViewportState): { x: numbe
   return { x: screen.x + size / 2, y: screen.y + size / 2 }
 }
 
+function positionKey(position: GridPosition): string {
+  return `${position.x},${position.y}`
+}
 function entityAtCell(project: FactoryProject, position: GridPosition): FactoryEntity | undefined {
   return project.entities.find((entity) => entity.position.x === position.x && entity.position.y === position.y)
 }
@@ -688,7 +888,7 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: 
 }
 
 const basicCircleShapes: ShapeId[] = ['iron-ore', 'coal-ore', 'copper-ore']
-const basicTriangleShapes: ShapeId[] = ['iron-ingot', 'copper-ingot', 'iron-gear', 'copper-wire', 'circuit']
+const basicTriangleShapes: ShapeId[] = ['iron-ingot', 'copper-ingot', 'iron-plate', 'steel', 'iron-gear', 'copper-wire', 'circuit', 'motor']
 
 function isBasicCircleShape(shape: ShapeId): boolean {
   return basicCircleShapes.includes(shape)

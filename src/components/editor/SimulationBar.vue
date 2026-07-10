@@ -1,15 +1,29 @@
 <template>
   <footer class="simulation-bar">
-    <div><strong>&#20132;&#20184;</strong><span>{{ total(metrics.delivered) }}</span></div>
-    <div><strong>&#29983;&#20135;</strong><span>{{ total(metrics.produced) }}</span></div>
-    <div><strong>&#22581;&#22622;</strong><span>{{ errors.length }}</span></div>
-    <div class="event-stream"><strong>&#20107;&#20214;&#26085;&#24535;</strong><span>{{ events[0]?.message ?? '\u70b9\u51fb\u8fd0\u884c\uff0c\u8ba9\u56fe\u5f62\u5f00\u59cb\u6d41\u52a8' }}</span></div>
+    <div><strong>交付</strong><span>{{ total(metrics.delivered) }}</span></div>
+    <div><strong>生产</strong><span>{{ total(metrics.produced) }}</span></div>
+    <div><strong>堵塞</strong><span>{{ errors.length }}</span></div>
+    <div class="performance-readout" :class="performanceTone">
+      <strong>性能</strong>
+      <span>{{ performance.fps }} FPS · {{ performance.frameTime.toFixed(1) }} ms · {{ performance.quality === 'high' ? '清晰' : '流畅' }}</span>
+    </div>
+    <div class="event-stream"><strong>事件日志</strong><span>{{ events[0]?.message ?? '点击运行，让物品开始流动' }}</span></div>
   </footer>
 </template>
 
 <script setup lang="ts">
-import type { FactoryError, FactoryMetrics, SimulationEvent } from '../../models/factory'
+import { computed } from 'vue'
+import type { FactoryError, FactoryMetrics, FactoryPerformance, SimulationEvent } from '../../models/factory'
 
-defineProps<{ metrics: FactoryMetrics; errors: FactoryError[]; events: SimulationEvent[] }>()
-function total(record: Record<string, number>): number { return Object.values(record).reduce((sum, amount) => sum + amount, 0) }
+const props = defineProps<{
+  metrics: FactoryMetrics
+  errors: FactoryError[]
+  events: SimulationEvent[]
+  performance: FactoryPerformance
+}>()
+
+const performanceTone = computed(() => props.performance.fps >= 55 ? 'good' : props.performance.fps >= 40 ? 'warn' : 'bad')
+function total(record: Record<string, number>): number {
+  return Object.values(record).reduce((sum, amount) => sum + amount, 0)
+}
 </script>

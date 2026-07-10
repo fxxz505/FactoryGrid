@@ -1,5 +1,6 @@
 import { buildingById } from '../../data/machines'
-import { assemblerRecipes, furnaceRecipes, recipeById } from '../../data/recipes'
+import { assemblerRecipes, furnaceRecipes, recipeById, recipeIsUnlocked } from '../../data/recipes'
+import { researchDefinitions, researchPointValues } from '../../data/research'
 import { nextPosition, cloneProject } from '../../data/examples'
 import { machinePortRoles } from '../../render/factoryAssets'
 import type {
@@ -16,6 +17,8 @@ import type {
   TickResult,
   RecipeDefinition
 } from '../../models/factory'
+
+type EntityIndex = Map<string, FactoryEntity>
 
 interface TickAccumulator {
   produced: Record<string, number>
@@ -35,15 +38,17 @@ export function runTicks(project: FactoryProject, count: number): FactoryProject
 }
 
 export function runTick(project: FactoryProject): TickResult {
-  const next = cloneProject(project)
+  const next = cloneSimulationProject(project)
   next.tick += 1
   ensureBelts(next)
   const accumulator: TickAccumulator = { produced: {}, delivered: {}, trashed: {}, events: [] }
+  const index = buildEntityIndex(next)
 
   updateSources(next, accumulator)
-  updateProcessors(next, accumulator)
-  updateBelts(next)
-  transferOutputs(next, accumulator)
+  updateProcessors(next, accumulator, index)
+  updateBelts(next, index)
+  transferOutputs(next, accumulator, index)
+  updateResearch(next, accumulator)
   const errors = detectErrors(next)
   next.errors = errors
   next.metrics = updateMetrics(next, accumulator, errors)
@@ -52,8 +57,42 @@ export function runTick(project: FactoryProject): TickResult {
   return { project: next, events: accumulator.events, errors }
 }
 
+function cloneSimulationProject(project: FactoryProject): FactoryProject {
+  const entities = project.entities.map((entity) => ({
+    ...entity,
+    position: { ...entity.position },
+    input: entity.input.map((item) => ({ ...item })),
+    output: entity.output.map((item) => ({ ...item }))
+  }))
+  const belts = Object.fromEntries(Object.entries(project.belts).map(([id, runtime]) => [
+    id,
+    { ...runtime, item: runtime.item ? { ...runtime.item } : undefined }
+  ]))
+  return {
+    ...project,
+    entities,
+    belts,
+    goals: project.goals.map((goal) => ({ ...goal })),
+    unlocked: [...project.unlocked],
+    metrics: {
+      ...project.metrics,
+      delivered: { ...project.metrics.delivered },
+      produced: { ...project.metrics.produced },
+      trashed: { ...project.metrics.trashed },
+      bottlenecks: [...project.metrics.bottlenecks],
+      recentDelivery: [...project.metrics.recentDelivery]
+    },
+    research: {
+      ...project.research,
+      delivered: { ...project.research.delivered },
+      completed: [...project.research.completed]
+    },
+    errors: [...project.errors],
+    events: [...project.events]
+  }
+}
 function ensureBelts(project: FactoryProject): void {
-  project.entities.filter((entity) => entity.type === 'belt').forEach((entity) => {
+  project.entities.filter((entity) => entity.kind === 'belt').forEach((entity) => {
     project.belts[entity.id] ??= {}
   })
 }
@@ -76,14 +115,14 @@ function updateSources(project: FactoryProject, accumulator: TickAccumulator): v
   })
 }
 
-function updateProcessors(project: FactoryProject, accumulator: TickAccumulator): void {
+function updateProcessors(project: FactoryProject, accumulator: TickAccumulator, index: EntityIndex): void {
   project.entities.filter((entity) => entity.kind === 'processor').forEach((entity) => {
     if (entity.type === 'trash') {
       updateTrash(entity, accumulator)
       return
     }
     if (ROUTER_TYPES.includes(entity.type)) {
-      updateRouter(project, entity)
+      updateRouter(project, entity, index)
       return
     }
     updateMachine(entity, project, accumulator)
@@ -100,14 +139,14 @@ function updateTrash(entity: FactoryEntity, accumulator: TickAccumulator): void 
   }
 }
 
-function updateRouter(project: FactoryProject, entity: FactoryEntity): void {
+function updateRouter(project: FactoryProject, entity: FactoryEntity, index: EntityIndex): void {
   const item = entity.input[0]
   if (!item) {
     entity.status = 'waiting'
     return
   }
-  const target = nextRouterTarget(project, entity, item)
-  if (!target || !canAccept(project, target, item, incomingDirection(entity, target))) {
+  const target = nextRouterTarget(project, entity, item, index)
+  if (!target || !canAccept(project, target, item, incomingDirection(entity, target), index)) {
     entity.status = 'blocked'
     return
   }
@@ -134,7 +173,7 @@ function updateMachine(entity: FactoryEntity, project: FactoryProject, accumulat
   const definition = buildingById[entity.type]
   entity.progress += 1
   entity.status = 'running'
-  if (entity.progress < (definition?.durationTicks ?? 10)) return
+  if (entity.progress < adjustedDuration(definition?.durationTicks ?? 10, entity.level)) return
 
   const transformed = transformFromInput(entity)
   if (!transformed) {
@@ -151,7 +190,7 @@ function updateRecipeMachine(entity: FactoryEntity, project: FactoryProject, acc
     entity.status = 'blocked'
     return
   }
-  const recipe = activeRecipe(entity)
+  const recipe = activeRecipe(entity, project)
   if (!recipe || !hasRecipeInputs(entity, recipe)) {
     entity.status = 'waiting'
     entity.progress = 0
@@ -160,22 +199,26 @@ function updateRecipeMachine(entity: FactoryEntity, project: FactoryProject, acc
 
   entity.progress += 1
   entity.status = 'running'
-  if (entity.progress < recipe.durationTicks) return
+  if (entity.progress < adjustedDuration(recipe.durationTicks, entity.level)) return
 
   recipe.inputs.forEach((ingredient) => {
     for (let count = 0; count < ingredient.amount; count += 1) consumeFirst(entity, ingredient.shape)
   })
   entity.progress = 0
-  entity.output.push(createItem(recipe.output, project.tick))
-  increment(accumulator.produced, recipe.output, 1)
+  const outputAmount = recipe.outputAmount ?? 1
+  for (let count = 0; count < outputAmount; count += 1) entity.output.push(createItem(recipe.output, project.tick))
+  increment(accumulator.produced, recipe.output, outputAmount)
 }
 
-function activeRecipe(entity: FactoryEntity): RecipeDefinition | undefined {
+function activeRecipe(entity: FactoryEntity, project: FactoryProject): RecipeDefinition | undefined {
   if (entity.type === 'furnace') {
     return furnaceRecipes.find((recipe) => hasRecipeInputs(entity, recipe))
       ?? furnaceRecipes.find((recipe) => recipe.inputs.some((ingredient) => entity.input.some((item) => item.shape === ingredient.shape)))
   }
-  if (entity.type === 'assembler') return recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
+  if (entity.type === 'assembler') {
+    const recipe = recipeById[entity.recipeId ?? 'iron-plate'] ?? assemblerRecipes[0]
+    return recipeIsUnlocked(project, recipe) ? recipe : undefined
+  }
   return undefined
 }
 
@@ -183,15 +226,16 @@ function hasRecipeInputs(entity: FactoryEntity, recipe: RecipeDefinition): boole
   return recipe.inputs.every((ingredient) => entity.input.filter((item) => item.shape === ingredient.shape).length >= ingredient.amount)
 }
 
-function updateBelts(project: FactoryProject): void {
-  const belts = project.entities.filter((entity) => entity.type === 'belt')
+function updateBelts(project: FactoryProject, index: EntityIndex): void {
+  const belts = project.entities.filter((entity) => entity.kind === 'belt')
   const ordered = [...belts].sort((a, b) => sortByDirection(a, b))
   ordered.forEach((belt) => {
     const runtime = project.belts[belt.id]
     const item = runtime?.item
-    if (!item || runtime.lastMovedTick === project.tick) return
-    const target = entityAt(project, nextPosition(belt.position, belt.direction))
-    if (!target || !canAccept(project, target, item, oppositeDirection(belt.direction))) {
+    const enteredTick = runtime?.enteredTick ?? project.tick - beltMoveInterval(belt)
+    if (!item || runtime.lastMovedTick === project.tick || project.tick - enteredTick < beltMoveInterval(belt)) return
+    const target = entityAt(index, nextPosition(belt.position, belt.direction))
+    if (!target || !canAccept(project, target, item, oppositeDirection(belt.direction), index)) {
       belt.status = 'blocked'
       return
     }
@@ -202,12 +246,12 @@ function updateBelts(project: FactoryProject): void {
   })
 }
 
-function transferOutputs(project: FactoryProject, accumulator: TickAccumulator): void {
+function transferOutputs(project: FactoryProject, accumulator: TickAccumulator, index: EntityIndex): void {
   const outputters = project.entities.filter((entity) => entity.kind !== 'belt' && entity.output.length)
   outputters.forEach((entity) => {
     const item = entity.output[0]
-    const target = entityAt(project, nextPosition(entity.position, entity.direction))
-    if (!target || !canAccept(project, target, item, oppositeDirection(entity.direction))) {
+    const target = entityAt(index, nextPosition(entity.position, entity.direction))
+    if (!target || !canAccept(project, target, item, oppositeDirection(entity.direction), index)) {
       entity.status = 'blocked'
       return
     }
@@ -216,32 +260,32 @@ function transferOutputs(project: FactoryProject, accumulator: TickAccumulator):
   })
 }
 
-function nextRouterTarget(project: FactoryProject, entity: FactoryEntity, item: ShapeItem): FactoryEntity | undefined {
-  if (entity.type === 'tunnel') return nextTunnelTarget(project, entity)
-  if (entity.type === 'launcher') return entityAt(project, nextPosition(entity.position, entity.direction, 4))
+function nextRouterTarget(project: FactoryProject, entity: FactoryEntity, item: ShapeItem, index: EntityIndex): FactoryEntity | undefined {
+  if (entity.type === 'tunnel') return nextTunnelTarget(project, entity, index)
+  if (entity.type === 'launcher') return entityAt(index, nextPosition(entity.position, entity.direction, 4))
   if (entity.type === 'splitter') {
     const branches = splitterBranches(entity.direction)
-    const index = entity.progress % branches.length
-    const preferredDirection = branches[index]
-    const fallbackDirection = branches[1 - index]
-    const preferred = entityAt(project, nextPosition(entity.position, preferredDirection))
-    if (preferred && canAccept(project, preferred, item, oppositeDirection(preferredDirection))) return preferred
-    return entityAt(project, nextPosition(entity.position, fallbackDirection))
+    const branchIndex = entity.progress % branches.length
+    const preferredDirection = branches[branchIndex]
+    const fallbackDirection = branches[1 - branchIndex]
+    const preferred = entityAt(index, nextPosition(entity.position, preferredDirection))
+    if (preferred && canAccept(project, preferred, item, oppositeDirection(preferredDirection), index)) return preferred
+    return entityAt(index, nextPosition(entity.position, fallbackDirection))
   }
-  return entityAt(project, nextPosition(entity.position, entity.direction))
+  return entityAt(index, nextPosition(entity.position, entity.direction))
 }
 
-function canAccept(project: FactoryProject, entity: FactoryEntity, item: ShapeItem, incoming?: Direction): boolean {
+function canAccept(project: FactoryProject, entity: FactoryEntity, item: ShapeItem, incoming?: Direction, index?: EntityIndex): boolean {
   if (entity.kind === 'belt') {
     const runtime = project.belts[entity.id]
-    const hasOpenPort = !incoming || incoming === oppositeDirection(entity.direction) || pointsToInput(project, entity, incoming)
+    const hasOpenPort = !incoming || incoming === oppositeDirection(entity.direction) || pointsToInput(index ?? buildEntityIndex(project), entity, incoming)
     return hasOpenPort && !runtime?.item
   }
   if (entity.kind === 'hub') return true
   if (entity.type === 'trash') return entity.input.length < 1
   if (entity.type === 'splitter') return entity.input.length < 1 && (!incoming || incoming === oppositeDirection(entity.direction))
   if (ROUTER_TYPES.includes(entity.type)) return entity.input.length < 1
-  if (entity.kind === 'processor') return acceptsIncomingPort(entity, incoming, item.shape) && hasInputRoom(entity, item.shape) && acceptsShape(entity, item.shape)
+  if (entity.kind === 'processor') return acceptsIncomingPort(entity, incoming, item.shape) && hasInputRoom(entity, item.shape) && acceptsShape(project, entity, item.shape)
   return false
 }
 
@@ -269,10 +313,15 @@ function acceptItem(
   }
 
   if (entity.kind === 'hub') {
-    increment(project.metrics.delivered, item.shape, 1)
     if (accumulator) increment(accumulator.delivered, item.shape, 1)
+    else increment(project.metrics.delivered, item.shape, 1)
     const goal = project.goals.find((candidate) => candidate.shape === item.shape)
     if (goal) goal.delivered += 1
+    const researchPoints = researchPointValues[item.shape] ?? 0
+    if (researchPoints > 0) {
+      project.research.points += researchPoints
+      project.research.delivered[item.shape] = (project.research.delivered[item.shape] ?? 0) + 1
+    }
     entity.status = 'delivering'
     accumulator?.events.unshift({ tick: project.tick, entityId: entity.id, message: `\u67a2\u7ebd\u63a5\u6536 ${item.shape}` })
     return
@@ -332,11 +381,8 @@ function transformShape(type: FactoryEntity['type'], shape: ShapeId): ShapeId {
 }
 
 function acceptsFurnacePort(entity: FactoryEntity, incoming: Direction, shape: ShapeId): boolean {
-  const oreInput = oppositeDirection(entity.direction)
-  const fuelInput = rotateCounterClockwise(entity.direction)
-  if (incoming === oreInput) return isFurnaceOre(shape)
-  if (incoming === fuelInput) return isFurnaceFuel(shape)
-  return false
+  const isInputPort = machinePortRoles(entity).some((port) => port.role === 'input' && port.direction === incoming)
+  return isInputPort && (isFurnaceOre(shape) || isFurnaceFuel(shape))
 }
 
 function hasInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
@@ -345,7 +391,7 @@ function hasInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
 }
 
 function hasFurnaceInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
-  if (!acceptsShape(entity, shape)) return false
+  if (!isFurnaceOre(shape) && !isFurnaceFuel(shape)) return false
   const sameShapeCount = entity.input.filter((item) => item.shape === shape).length
   if (isFurnaceFuel(shape)) return sameShapeCount < 2
   if (isFurnaceOre(shape)) return sameShapeCount < 2
@@ -353,21 +399,21 @@ function hasFurnaceInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
 }
 
 function isFurnaceOre(shape: ShapeId): boolean {
-  return shape === 'iron-ore' || shape === 'copper-ore'
+  return shape === 'iron-ore' || shape === 'copper-ore' || shape === 'iron-ingot'
 }
 
 function isFurnaceFuel(shape: ShapeId): boolean {
   return shape === 'coal-ore'
 }
-function acceptsShape(entity: FactoryEntity, shape: ShapeId): boolean {
+function acceptsShape(project: FactoryProject, entity: FactoryEntity, shape: ShapeId): boolean {
   if (entity.type === 'painter-red') return shape === 'circle'
   if (entity.type === 'painter-blue') return shape === 'square' || shape === 'diamond'
   if (entity.type === 'painter-green') return shape === 'star'
   if (entity.type === 'stacker') return ['circle-red', 'square', 'square-blue', 'diamond', 'star', 'star-green'].includes(shape)
   if (entity.type === 'furnace') return furnaceRecipes.some((recipe) => recipe.inputs.some((ingredient) => ingredient.shape === shape))
   if (entity.type === 'assembler') {
-    const recipe = recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
-    return recipe.inputs.some((ingredient) => ingredient.shape === shape)
+    const recipe = recipeById[entity.recipeId ?? 'iron-plate'] ?? assemblerRecipes[0]
+    return recipeIsUnlocked(project, recipe) && recipe.inputs.some((ingredient) => ingredient.shape === shape)
   }
   return true
 }
@@ -376,10 +422,49 @@ function inputCapacity(entity: FactoryEntity): number {
   if (entity.type === 'stacker') return 2
   if (entity.type === 'furnace') return 4
   if (entity.type === 'assembler') {
-    const recipe = recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
+    const recipe = recipeById[entity.recipeId ?? 'iron-plate'] ?? assemblerRecipes[0]
     return recipe.inputs.reduce((sum, ingredient) => sum + ingredient.amount, 0) + 2
   }
   return 1
+}
+
+function adjustedDuration(baseDuration: number, level = 1): number {
+  if (level >= 3) return Math.max(1, Math.ceil(baseDuration * 0.55))
+  if (level >= 2) return Math.max(1, Math.ceil(baseDuration * 0.75))
+  return baseDuration
+}
+
+function beltMoveInterval(entity: FactoryEntity): number {
+  return entity.type === 'fast-belt' ? 1 : 2
+}
+
+function updateResearch(project: FactoryProject, accumulator: TickAccumulator): void {
+  let completedResearch = true
+  while (completedResearch) {
+    completedResearch = false
+    for (const research of researchDefinitions) {
+      if (project.research.completed.includes(research.id)) continue
+      if (!research.prerequisites.every((id) => project.research.completed.includes(id))) continue
+      if (project.research.points < research.cost) continue
+      if (!research.requirements.every((requirement) => (project.research.delivered[requirement.shape] ?? 0) >= requirement.amount)) continue
+
+      project.research.points -= research.cost
+      project.research.completed.push(research.id)
+      research.unlockBuildings?.forEach((building) => {
+        if (!project.unlocked.includes(building)) project.unlocked.push(building)
+      })
+      if (research.maxMachineLevel) {
+        project.research.maxMachineLevel = Math.max(project.research.maxMachineLevel, research.maxMachineLevel)
+      }
+      accumulator.events.unshift({
+        tick: project.tick,
+        entityId: 'research',
+        message: '研究完成：' + research.name
+      })
+      completedResearch = true
+      break
+    }
+  }
 }
 function detectErrors(project: FactoryProject): FactoryError[] {
   const errors: FactoryError[] = []
@@ -411,8 +496,12 @@ function updateMetrics(project: FactoryProject, accumulator: TickAccumulator, er
   }
 }
 
-function entityAt(project: FactoryProject, position: GridPosition): FactoryEntity | undefined {
-  return project.entities.find((entity) => entity.position.x === position.x && entity.position.y === position.y)
+function buildEntityIndex(project: FactoryProject): EntityIndex {
+  return new Map(project.entities.map((entity) => [positionKey(entity.position), entity]))
+}
+
+function entityAt(index: EntityIndex, position: GridPosition): FactoryEntity | undefined {
+  return index.get(positionKey(position))
 }
 
 function createItem(shape: ShapeId, tick: number): ShapeItem {
@@ -436,15 +525,15 @@ function sortByDirection(a: FactoryEntity, b: FactoryEntity): number {
   return a.direction === 'south' ? b.position.y - a.position.y : a.position.y - b.position.y
 }
 
-function nextTunnelTarget(project: FactoryProject, entity: FactoryEntity): FactoryEntity | undefined {
-  const exit = findTunnelExit(project, entity)
-  if (exit) return entityAt(project, nextPosition(exit.position, exit.direction))
-  return entityAt(project, nextPosition(entity.position, entity.direction, 3))
+function nextTunnelTarget(project: FactoryProject, entity: FactoryEntity, index: EntityIndex): FactoryEntity | undefined {
+  const exit = findTunnelExit(entity, index)
+  if (exit) return entityAt(index, nextPosition(exit.position, exit.direction))
+  return entityAt(index, nextPosition(entity.position, entity.direction, 3))
 }
 
-function findTunnelExit(project: FactoryProject, entrance: FactoryEntity): FactoryEntity | undefined {
+function findTunnelExit(entrance: FactoryEntity, index: EntityIndex): FactoryEntity | undefined {
   for (let distance = 2; distance <= 5; distance += 1) {
-    const candidate = entityAt(project, nextPosition(entrance.position, entrance.direction, distance))
+    const candidate = entityAt(index, nextPosition(entrance.position, entrance.direction, distance))
     if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
   }
   return undefined
@@ -475,11 +564,15 @@ function incomingDirection(from: FactoryEntity, to: FactoryEntity): Direction | 
   return undefined
 }
 
-function pointsToInput(project: FactoryProject, belt: FactoryEntity, incoming: Direction): boolean {
-  const neighbor = entityAt(project, nextPosition(belt.position, incoming))
+function pointsToInput(index: EntityIndex, belt: FactoryEntity, incoming: Direction): boolean {
+  const neighbor = entityAt(index, nextPosition(belt.position, incoming))
   return Boolean(neighbor && neighbor.direction === oppositeDirection(incoming))
 }
 
+
+function positionKey(position: GridPosition): string {
+  return position.x + ',' + position.y
+}
 function oppositeDirection(direction: Direction): Direction {
   if (direction === 'north') return 'south'
   if (direction === 'south') return 'north'

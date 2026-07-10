@@ -34,6 +34,7 @@ export const machineGeometry: Record<BuildingType, MachineGeometryStyle> = {
   'source-coal': { body: '#e4e3df', rim: '#323433', accent: '#242424', core: 'circle', scale: 0.9 },
   'source-copper': { body: '#f0e7de', rim: '#704b35', accent: '#a66a3f', core: 'circle', scale: 0.9 },
   belt: { body: '#4a4b46', rim: '#262a28', accent: '#7a7a70', core: 'bars', scale: 1 },
+  'fast-belt': { body: '#3f5654', rim: '#22312f', accent: '#6da69f', core: 'bars', scale: 1 },
   splitter: { body: '#e4eee8', rim: '#405d54', accent: '#4fa186', core: 'split', scale: 0.96 },
   merger: { body: '#e4eee8', rim: '#405d54', accent: '#4fa186', core: 'merge', scale: 0.96 },
   tunnel: { body: '#e8ece9', rim: '#46545b', accent: '#7c8b92', core: 'pipe', scale: 0.96 },
@@ -69,7 +70,7 @@ export function planBeltSprite(project: FactoryProject, belt: FactoryEntity): Be
 }
 
 export function entityConnectionDirections(project: FactoryProject, entity: FactoryEntity): Direction[] {
-  if (entity.type === 'belt') return connectedDirections(project, entity)
+  if (entity.kind === 'belt') return connectedDirections(project, entity)
   return normalizeConnections(machinePorts(entity).map((port) => port.direction))
 }
 
@@ -90,12 +91,12 @@ export function connectedDirections(project: FactoryProject, entity: FactoryEnti
       return
     }
 
-    if (neighbor.type !== 'belt' && machinePorts(neighbor).some((port) => port.direction === opposite(direction))) {
+    if (neighbor.kind !== 'belt' && machinePorts(neighbor).some((port) => port.direction === opposite(direction))) {
       dirs.add(direction)
       return
     }
 
-    if (neighbor.type === 'belt') {
+    if (neighbor.kind === 'belt') {
       if (pointsTo(neighbor, entity.position) || pointsTo(entity, neighbor.position)) dirs.add(direction)
       return
     }

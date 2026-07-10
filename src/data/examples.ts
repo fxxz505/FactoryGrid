@@ -1,4 +1,4 @@
-import { buildingById } from './machines'
+﻿import { buildingById } from './machines'
 import type { BuildingType, Direction, FactoryEntity, FactoryProject, ShapeId } from '../models/factory'
 
 let entityCounter = 0
@@ -6,7 +6,7 @@ let entityCounter = 0
 export function createEntity(overrides: Partial<FactoryEntity> & Pick<FactoryEntity, 'type'>): FactoryEntity {
   const type = overrides.type
   return {
-    id: overrides.id ?? `${type}-${entityCounter++}`,
+    id: overrides.id ?? type + '-' + entityCounter++,
     kind: overrides.kind ?? inferKind(type),
     type,
     label: overrides.label ?? labelFor(type),
@@ -17,13 +17,14 @@ export function createEntity(overrides: Partial<FactoryEntity> & Pick<FactoryEnt
     output: overrides.output ?? [],
     progress: overrides.progress ?? 0,
     status: overrides.status ?? 'idle',
-    recipeId: overrides.recipeId ?? defaultRecipeFor(type)
+    recipeId: overrides.recipeId ?? defaultRecipeFor(type),
+    level: overrides.level
   }
 }
 
 function inferKind(type: BuildingType): FactoryEntity['kind'] {
   if (type.startsWith('source-')) return 'source'
-  if (type === 'belt') return 'belt'
+  if (type === 'belt' || type === 'fast-belt') return 'belt'
   if (type === 'hub') return 'hub'
   return 'processor'
 }
@@ -40,7 +41,7 @@ function sourceShapeFor(type: BuildingType): ShapeId | undefined {
 }
 
 function defaultRecipeFor(type: BuildingType): string | undefined {
-  if (type === 'assembler') return 'gear'
+  if (type === 'assembler') return 'iron-plate'
   return undefined
 }
 
@@ -62,7 +63,6 @@ export function createShapezProject(): FactoryProject {
     createEntity({ id: 'belt-a3', type: 'belt', position: { x: 5, y: 3 }, direction: 'east' }),
     createEntity({ id: 'launcher-a', type: 'launcher', position: { x: 6, y: 3 }, direction: 'east' }),
     createEntity({ id: 'hub', type: 'hub', position: { x: 10, y: 3 }, direction: 'east' }),
-
     createEntity({ id: 'square-source', type: 'source-square', position: { x: 0, y: 7 }, direction: 'east' }),
     createEntity({ id: 'square-belt-1', type: 'belt', position: { x: 1, y: 7 }, direction: 'east' }),
     createEntity({ id: 'cutter', type: 'cutter', position: { x: 2, y: 7 }, direction: 'east' }),
@@ -74,7 +74,6 @@ export function createShapezProject(): FactoryProject {
     createEntity({ id: 'half-hub', type: 'hub', position: { x: 7, y: 5 }, direction: 'east' }),
     createEntity({ id: 'square-trash-belt', type: 'belt', position: { x: 3, y: 8 }, direction: 'south' }),
     createEntity({ id: 'square-trash', type: 'trash', position: { x: 3, y: 9 }, direction: 'south' }),
-
     createEntity({ id: 'star-source', type: 'source-star', position: { x: 0, y: 11 }, direction: 'east' }),
     createEntity({ id: 'star-belt-1', type: 'belt', position: { x: 1, y: 11 }, direction: 'east' }),
     createEntity({ id: 'green-painter', type: 'painter-green', position: { x: 2, y: 11 }, direction: 'east' }),
@@ -84,7 +83,7 @@ export function createShapezProject(): FactoryProject {
 
   return {
     id: 'shapez-factory',
-    name: '\u5f02\u5f62\u5de5\u5382\u5b9e\u9a8c\u573a',
+    name: '异形工厂实验场',
     tick: 0,
     running: false,
     renderAlpha: 0,
@@ -99,48 +98,31 @@ export function createShapezProject(): FactoryProject {
       { shape: 'star-green', amount: 4, delivered: 0 }
     ],
     unlocked: [
-      'source-circle',
-      'source-square',
-      'source-star',
-      'source-diamond',
-      'source-iron',
-      'source-coal',
-      'source-copper',
-      'belt',
-      'splitter',
-      'merger',
-      'tunnel',
-      'launcher',
-      'cutter',
-      'rotator',
-      'painter-red',
-      'painter-blue',
-      'painter-green',
-      'stacker',
-      'furnace',
-      'assembler',
-      'trash',
-      'hub'
+      'source-circle', 'source-square', 'source-star', 'source-diamond',
+      'source-iron', 'source-coal', 'source-copper', 'belt',
+      'splitter', 'merger', 'tunnel', 'launcher', 'cutter', 'rotator',
+      'painter-red', 'painter-blue', 'painter-green', 'stacker',
+      'furnace', 'assembler', 'trash', 'hub'
     ],
     entities,
     belts: {},
     metrics: {
-      delivered: {},
-      produced: {},
-      trashed: {},
-      beltItems: 0,
-      activeBuildings: 0,
-      bottlenecks: [],
-      recentDelivery: []
+      delivered: {}, produced: {}, trashed: {}, beltItems: 0,
+      activeBuildings: 0, bottlenecks: [], recentDelivery: []
     },
+    research: { points: 0, delivered: {}, completed: [], maxMachineLevel: 1 },
+    performance: { fps: 60, frameTime: 16.7, quality: 'high' },
     errors: [],
     events: [],
     blueprints: [
       {
         id: 'bp-red-circle-line',
-        name: '\u7ea2\u5706\u4e3b\u7ebf',
-        description: '\u5706\u5f62\u77ff\u8109\u3001\u5206\u6d41\u3001\u67d3\u8272\u3001\u8de8\u7ebf\u53d1\u5c04\u4e0e\u67a2\u7ebd\u4ea4\u4ed8\u3002',
+        name: '红圆主线',
+        description: '圆形矿脉、分流、染色、跨线发射与枢纽交付。',
         entityIds: ['circle-source', 'belt-a1', 'splitter-a', 'belt-a-side', 'belt-a-turn', 'belt-a2', 'red-painter', 'belt-a3', 'launcher-a'],
+        entities: [],
+        width: 0,
+        height: 0,
         createdAt: '2026-07-06T00:00:00.000Z'
       }
     ],

@@ -23,34 +23,25 @@ describe('shape factory simulation', () => {
     expect(result.metrics.produced['copper-ore']).toBeGreaterThanOrEqual(1)
   })
 
-  it('keeps furnace ore and fuel ports distinct while waiting for matching inputs', () => {
+  it('accepts ore and fuel from either furnace input port', () => {
     let project = createShapezProject()
     project.entities = []
     project.belts = {}
 
-    project = placeBuilding(project, 'furnace', { x: 0, y: 0 }, 'east')
-    project = placeBuilding(project, 'source-coal', { x: -1, y: 0 }, 'east')
-    project = placeBuilding(project, 'source-iron', { x: 0, y: -1 }, 'south')
+    project = placeBuilding(project, 'source-coal', { x: 0, y: 1 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 1, y: 1 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 2, y: 1 }, 'east')
+    project = placeBuilding(project, 'source-iron', { x: 3, y: -2 }, 'south')
+    project = placeBuilding(project, 'belt', { x: 3, y: -1 }, 'south')
+    project = placeBuilding(project, 'belt', { x: 3, y: 0 }, 'south')
+    project = placeBuilding(project, 'furnace', { x: 3, y: 1 }, 'east')
+    project = placeBuilding(project, 'belt', { x: 4, y: 1 }, 'east')
+    project = placeBuilding(project, 'hub', { x: 5, y: 1 }, 'east')
 
-    const wrongPorts = runTicks(project, 18)
-    const wrongFurnace = wrongPorts.entities.find((entity) => entity.type === 'furnace')!
+    const result = runTicks(project, 120)
 
-    expect(wrongFurnace.input).toHaveLength(0)
-    expect(wrongFurnace.output).toHaveLength(0)
-
-    project = createShapezProject()
-    project.entities = []
-    project.belts = {}
-
-    project = placeBuilding(project, 'furnace', { x: 0, y: 0 }, 'east')
-    project = placeBuilding(project, 'source-iron', { x: -1, y: 0 }, 'east')
-    project = placeBuilding(project, 'source-coal', { x: 0, y: -1 }, 'south')
-
-    const rightPorts = runTicks(project, 60)
-    const rightFurnace = rightPorts.entities.find((entity) => entity.type === 'furnace')!
-
-    expect(rightFurnace.output[0]?.shape).toBe('iron-ingot')
-    expect(rightPorts.metrics.produced['iron-ingot']).toBe(1)
+    expect(result.metrics.produced['iron-ingot']).toBeGreaterThanOrEqual(1)
+    expect(result.metrics.delivered['iron-ingot']).toBeGreaterThanOrEqual(1)
   })
   it('smelts ore with coal in a furnace and outputs ingots only after both inputs arrive', () => {
     let project = createShapezProject()
@@ -85,7 +76,7 @@ describe('shape factory simulation', () => {
     const result = runTicks(project, 24)
 
     expect(result.entities.find((entity) => entity.type === 'assembler')?.output[0]?.shape).toBe('copper-wire')
-    expect(result.metrics.produced['copper-wire']).toBe(1)
+    expect(result.metrics.produced['copper-wire']).toBe(2)
   })
   it('keeps a render interpolation alpha separate from fixed simulation ticks', () => {
     const project = createShapezProject()

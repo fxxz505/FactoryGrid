@@ -37,8 +37,12 @@ test('user can preview belt dragging, pan the canvas and save a blueprint', asyn
   await canvas.hover({ position: { x: 540, y: 280 } })
   await page.mouse.wheel(0, -220)
 
-  await page.getByRole('button', { name: /10/ }).click()
-  await expect(page.locator('.blueprint-card').first()).toBeVisible()
+  await page.getByRole('button', { name: /框选复制/ }).click()
+  await canvas.dragTo(canvas, {
+    sourcePosition: { x: 160, y: 110 },
+    targetPosition: { x: 300, y: 220 }
+  })
+  await expect(page.locator('.blueprint-card').filter({ hasText: '区域蓝图' }).first()).toBeVisible()
 })
 
 test('machines use simple geometric language without text labels or image assets', async ({ page }) => {
@@ -50,10 +54,10 @@ test('machines use simple geometric language without text labels or image assets
   await page.goto('/')
   const canvas = page.getByTestId('factory-canvas')
   await expect(canvas).toBeVisible()
-  await expect(page.locator('.tool-row svg')).toHaveCount(1)
+  await expect(page.locator('.tool-row svg')).toHaveCount(5)
   await expect(page.locator('.machine-icon img')).toHaveCount(0)
   await expect(page.locator('.machine-icon .icon-core')).toHaveCount(22)
-  await expect(page.locator('canvas')).not.toContainText('\u67a2')
+  await expect(page.getByTestId('factory-canvas')).not.toContainText('\u67a2')
   expect(assetRequests).toEqual([])
 })
 
@@ -91,9 +95,9 @@ test('legacy saves omit removed container and inserter tools with clean delete l
 
   await expect(page.getByRole('button', { name: new RegExp('^\\u50a8\\u7269\\u7bb1') })).toHaveCount(0)
   await expect(page.getByRole('button', { name: new RegExp('^\\u673a\\u68b0\\u81c2') })).toHaveCount(0)
-  await expect(page.locator('.danger-tool')).toContainText('\u62c6\u9664\u5efa\u7b51')
-  await expect(page.locator('.danger-tool')).toContainText('\u70b9\u51fb\u683c\u5b50\u5220\u9664\u5efa\u7b51')
-  await expect(page.locator('.danger-tool')).not.toContainText('\u79fb\u52a8\u753b\u5e03')
+  await expect(page.locator('.danger-tool').first()).toContainText('\u62c6\u9664\u5efa\u7b51')
+  await expect(page.locator('.danger-tool').first()).toContainText('\u70b9\u51fb\u5355\u4e2a\u683c\u5b50\u5220\u9664\u5efa\u7b51')
+  await expect(page.locator('.danger-tool').first()).not.toContainText('\u79fb\u52a8\u753b\u5e03')
 })
 
 
@@ -112,7 +116,7 @@ test('ore generators furnace and assembler are available with recipe selection U
   await canvas.dblclick({ position: { x: 500, y: 240 } })
 
   await expect(page.locator('.recipe-panel')).toBeVisible()
-  await expect(page.locator('.recipe-choice')).toContainText(['\u9f7f\u8f6e', '\u94dc\u7ebf', '\u7b80\u6613\u7535\u8def'])
+  await expect(page.locator('.recipe-choice')).toContainText(['\u94c1\u677f', '\u94dc\u7ebf', '\u9f7f\u8f6e', '\u7535\u8def'])
 })
 
 
@@ -230,30 +234,31 @@ test('smooth conveyor item motion is rendered between belt edges instead of fixe
   const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
 
   expect(model).toContain('enteredTick?: number')
-  expect(model).toContain('renderAlpha: number')
   expect(app).toContain('SIMULATION_STEP_MS')
   expect(app).toContain('simAccumulator')
-  expect(app).toContain('project.renderAlpha')
+  expect(canvas).toContain('renderFactoryDynamicCanvas')
   expect(renderer).toContain('function beltItemPoint')
   expect(renderer).toContain('function beltFrameProgress')
-  expect(renderer).toContain('function drawBeltItem')
-  expect(renderer).toContain('belts.forEach((entity) => drawBeltItem')
-  expect(renderer).toContain('project.renderAlpha ?? 0')
+  expect(renderer).toContain('scene.belts.forEach((entity) => {')
+  expect(renderer).toContain('const point = beltItemPoint')
+  expect(renderer).toContain('drawShapeBatch')
+  expect(renderer).toContain('beltFrameProgress(project, renderAlpha)')
   expect(renderer).not.toContain('performance.now()')
   expect(renderer).not.toContain('drawShape(ctx, item.shape, x + size / 2, y + size / 2')
-  expect(canvas).toContain('props.project.renderAlpha')
+  expect(canvas).toContain('const renderAlpha = props.project.running')
 })
 
 test('conveyor animation uses one render clock and stable shape paths to avoid jitter', async () => {
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
   const canvas = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/FactoryCanvas.vue', 'utf8'))
   const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
-  const drawShape = renderer.match(/function drawShape[\s\S]*?function star/)
+  const drawShape = renderer.match(/function drawShape\([\s\S]*?function star/)
 
   expect(canvas).not.toContain('function animateBelts')
-  expect(canvas).not.toContain('animationFrame')
-  expect(app).toContain('project.renderAlpha = Math.min(1, simAccumulator / stepMs)')
-  expect(renderer).toContain('return clamp01(project.renderAlpha ?? 0)')
+  expect(canvas).toContain('animationFrame = window.requestAnimationFrame(animateItems)')
+  expect(app).not.toContain('project.renderAlpha =')
+  expect(app).not.toContain('else scheduleSaveProject()')
+  expect(renderer).toContain('return clamp01(renderAlpha)')
   expect(drawShape?.[0]).toContain('ctx.beginPath()')
   expect(drawShape?.[0]).toContain('ctx.rect(')
   expect(drawShape?.[0]).not.toContain('ctx.fillRect(x - radius')
@@ -286,10 +291,124 @@ test('pan tool labels and README stay clean Chinese for GitHub publishing', asyn
   const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
   const readme = await import('node:fs/promises').then((fs) => fs.readFile('README.md', 'utf8'))
 
-  expect(app).toContain('&#31227;&#21160;&#30011;&#24067;')
-  expect(app).toContain('&#25302;&#21160;&#35270;&#35282;&#65292;&#19981;&#25918;&#32622;&#24314;&#31569;&#12290;')
+  expect(app).toContain('\u79fb\u52a8\u753b\u5e03')
+  expect(app).toContain('\u62d6\u52a8\u89c6\u89d2\uff0c\u4e0d\u653e\u7f6e\u5efa\u7b51\u3002')
   expect(app).not.toContain('\ufffd')
   expect(readme).toContain('# FactoryGrid')
   expect(readme).not.toContain('## \u5f00\u53d1\u7ea6\u5b9a')
   expect(readme).not.toContain('\ufffd')
+})
+
+test('research panel tracks industrial delivery progress and locks advanced recipes', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.research-panel')).toBeVisible()
+  await expect(page.locator('.research-points')).toContainText('研究点')
+  await expect(page.locator('.research-node')).toHaveCount(4)
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.getByRole('button', { name: /^合成器/ }).click()
+  await canvas.click({ position: { x: 500, y: 240 } })
+  await canvas.dblclick({ position: { x: 500, y: 240 } })
+
+  await expect(page.locator('.recipe-choice')).toContainText(['铁板', '铜线', '齿轮', '电路'])
+  await expect(page.locator('.recipe-choice').filter({ hasText: '电机' })).toHaveCount(0)
+})
+
+test('completed metallurgy research reveals the motor recipe and upgrade planner', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('factorygrid-shapez-v4', JSON.stringify({
+      id: 'researched-factory',
+      name: '研究工厂',
+      tick: 0,
+      running: false,
+      renderAlpha: 0,
+      speed: 2,
+      activeTool: 'belt',
+      activeDirection: 'east',
+      viewport: { x: 150, y: 88, zoom: 1 },
+      goals: [],
+      unlocked: ['belt', 'fast-belt', 'assembler', 'furnace', 'hub'],
+      entities: [],
+      belts: {},
+      metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+      research: {
+        points: 0,
+        delivered: { 'iron-plate': 8, 'copper-wire': 8, 'iron-gear': 8, circuit: 8, steel: 8 },
+        completed: ['logistics-engineering', 'automation-upgrade', 'metallurgy-automation'],
+        maxMachineLevel: 2
+      },
+      performance: { fps: 60, frameTime: 16.7, quality: 'high' },
+      errors: [],
+      events: [],
+      blueprints: [],
+      history: []
+    }))
+  })
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: /升级规划器/ })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /^高速传送带/ })).toBeVisible()
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.getByRole('button', { name: /^合成器/ }).click()
+  await canvas.click({ position: { x: 500, y: 240 } })
+  await canvas.dblclick({ position: { x: 500, y: 240 } })
+  await expect(page.locator('.recipe-choice').filter({ hasText: '电机' })).toBeVisible()
+})
+
+test('large factory tools provide area copy paste delete and upgrade workflows', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: /框选复制/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /蓝图粘贴/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /批量拆除/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /升级规划器/ })).toBeDisabled()
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.getByRole('button', { name: /框选复制/ }).click()
+  await canvas.dragTo(canvas, {
+    sourcePosition: { x: 160, y: 110 },
+    targetPosition: { x: 300, y: 220 }
+  })
+
+  await expect(page.locator('.blueprint-card').filter({ hasText: '区域蓝图' }).first()).toBeVisible()
+})
+
+test('performance status and viewport culling protect large canvas rendering', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.performance-readout')).toContainText('FPS')
+  await expect(page.locator('.performance-readout')).toContainText(/清晰|流畅/)
+
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
+
+  expect(renderer).toContain('function visibleEntities')
+  expect(renderer).toContain('function visibleGridBounds')
+  expect(renderer).toContain('const ratioCap')
+  expect(app).toContain('MAX_SIMULATION_STEPS_PER_FRAME')
+  expect(app).toContain('updatePerformance')
+})
+
+test('conveyor animation uses layered canvases without reactive per-frame updates', async () => {
+  const canvas = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/FactoryCanvas.vue', 'utf8'))
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
+
+  expect(canvas).toContain('factory-canvas-static')
+  expect(canvas).toContain('factory-canvas-dynamic')
+  expect(canvas).toContain('renderFactoryStaticCanvas')
+  expect(canvas).toContain('renderFactoryDynamicCanvas')
+  expect(canvas).toContain("document.visibilityState === 'hidden'")
+  expect(renderer).toContain('export interface FactoryRenderScene')
+  expect(renderer).toContain('beltPlans: Map<string, BeltSpritePlan>')
+  expect(app).not.toContain('project.renderAlpha =')
+  expect(app).not.toContain('else scheduleSaveProject()')
+  expect(canvas).not.toContain('props.project.renderAlpha')
+})
+test('standard belt interpolation respects its two tick movement interval', async () => {
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  expect(renderer).toContain('function beltMoveInterval')
+  expect(renderer).toContain('/ beltMoveInterval(entity)')
 })

@@ -2,54 +2,59 @@
   <div class="factory-canvas-wrap">
     <div class="canvas-head">
       <div>
-        <strong>&#24037;&#21378;&#30011;&#24067;</strong>
-        <span>&#25302;&#25341;&#38138;&#20256;&#36865;&#24102;&#65292;&#25353;&#20303;&#31354;&#26684;&#25110;&#20013;&#38190;&#31227;&#21160;&#30011;&#24067;&#65292;&#28378;&#36718;&#32553;&#25918;&#12290;</span>
+        <strong>工厂画布</strong>
+        <span>拖拽铺传送带或框选区域，按住空格或中键移动画布，滚轮缩放。</span>
       </div>
       <div class="canvas-legend">
-        <span><i class="ok"></i> &#36816;&#34892;</span>
-        <span><i class="warn"></i> &#31561;&#24453;</span>
-        <span><i class="bad"></i> &#22581;&#22622;</span>
+        <span><i class="ok"></i> 运行</span>
+        <span><i class="warn"></i> 等待</span>
+        <span><i class="bad"></i> 堵塞</span>
       </div>
     </div>
-    <canvas
-      ref="canvasRef"
-      class="factory-canvas"
-      :class="{ panning: isPanning || project.activeTool === 'pan', previewing: Boolean(preview) }"
-      data-testid="factory-canvas"
-      @click="onClick"
-      @dblclick="onDoubleClick"
-      @mousedown="onDown"
-      @mousemove="onMove"
-      @mouseup="onUp"
-      @mouseleave="onLeave"
-      @auxclick.prevent
-      @wheel.prevent="onWheel"
-      @contextmenu.prevent="onDelete"
-    ></canvas>
+    <div class="factory-canvas-stage">
+      <canvas
+        ref="staticCanvasRef"
+        class="factory-canvas factory-canvas-static"
+        :class="{ panning: isPanning || project.activeTool === 'pan', previewing: Boolean(preview || areaPreview) }"
+        data-testid="factory-canvas"
+        @click="onClick"
+        @dblclick="onDoubleClick"
+        @mousedown="onDown"
+        @mousemove="onMove"
+        @mouseup="onUp"
+        @mouseleave="onLeave"
+        @auxclick.prevent
+        @wheel.prevent="onWheel"
+        @contextmenu.prevent="onDelete"
+      ></canvas>
+      <canvas ref="dynamicCanvasRef" class="factory-canvas-dynamic" aria-hidden="true"></canvas>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { BeltPreview, Direction, FactoryProject, GridPosition, ViewportState } from '../../models/factory'
+import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
+import type { AreaPreview, BeltPreview, Direction, FactoryProject, GridPosition, ViewportState } from '../../models/factory'
 import { beltRoute, tunnelRoute } from '../../engine/simulation/editorActions'
-import { entityAtPoint, renderFactoryCanvas, screenToGrid } from '../../render/canvasRenderer'
+import {
+  createFactoryRenderScene, entityAtPoint, renderFactoryDynamicCanvas,
+  renderFactoryStaticCanvas, screenToGrid, type FactoryRenderScene
+} from '../../render/canvasRenderer'
 
-const props = defineProps<{
-  project: FactoryProject
-  selectedEntityId?: string
-}>()
+const props = defineProps<{ project: FactoryProject; selectedEntityId?: string }>()
 
 const emit = defineEmits<{
   select: [id: string]
   place: [cell: GridPosition]
   dragBelt: [start: GridPosition, end: GridPosition, direction: Direction]
+  areaAction: [start: GridPosition, end: GridPosition]
   deleteCell: [cell: GridPosition]
   viewportChange: [viewport: ViewportState]
   configureAssembler: [id: string]
 }>()
 
-const canvasRef = ref<HTMLCanvasElement>()
+const staticCanvasRef = ref<HTMLCanvasElement>()
+const dynamicCanvasRef = ref<HTMLCanvasElement>()
 const hoverCell = ref<GridPosition>()
 const dragStart = ref<GridPosition>()
 const dragEnd = ref<GridPosition>()
@@ -58,10 +63,18 @@ const isSpaceDown = ref(false)
 const isDragging = ref(false)
 const suppressClick = ref(false)
 let panStart: { x: number; y: number; viewport: ViewportState } | undefined
-let paintFrame = 0
+const SIMULATION_STEP_MS = 170
+const topologySignature = computed(() => props.project.entities.map((entity) => (
+  `${entity.id}:${entity.type}:${entity.position.x}:${entity.position.y}:${entity.direction}:${entity.level ?? 1}`
+)).join('|'))
+let staticPaintFrame = 0
+let animationFrame = 0
+let scene: FactoryRenderScene | undefined
+let lastTick = props.project.tick
+let tickStartedAt = performance.now()
 
 const preview = computed<BeltPreview | undefined>(() => {
-  if (!isDragging.value || !dragStart.value || !dragEnd.value || !['belt', 'tunnel'].includes(props.project.activeTool)) return undefined
+  if (!isDragging.value || !dragStart.value || !dragEnd.value || !['belt', 'fast-belt', 'tunnel'].includes(props.project.activeTool)) return undefined
   const route = props.project.activeTool === 'tunnel'
     ? tunnelRoute(dragStart.value, dragEnd.value, props.project.activeDirection)
     : beltRoute(dragStart.value, dragEnd.value, props.project.activeDirection)
@@ -74,22 +87,52 @@ const preview = computed<BeltPreview | undefined>(() => {
   }
 })
 
-function paint(): void {
-  paintFrame = 0
-  if (!canvasRef.value) return
-  renderFactoryCanvas(canvasRef.value, props.project, {
+const areaPreview = computed<AreaPreview | undefined>(() => {
+  if (!isDragging.value || !dragStart.value || !dragEnd.value) return undefined
+  if (props.project.activeTool === 'copy-area') return { start: dragStart.value, end: dragEnd.value, mode: 'copy' }
+  if (props.project.activeTool === 'delete-area') return { start: dragStart.value, end: dragEnd.value, mode: 'delete' }
+  if (props.project.activeTool === 'upgrade-area') return { start: dragStart.value, end: dragEnd.value, mode: 'upgrade' }
+  return undefined
+})
+
+function selectionState() {
+  return {
     selectedEntityId: props.selectedEntityId,
     hoverCell: hoverCell.value,
-    preview: preview.value
-  })
+    preview: preview.value,
+    areaPreview: areaPreview.value
+  }
 }
 
-function schedulePaint(): void {
-  if (paintFrame) return
-  paintFrame = window.requestAnimationFrame(paint)
+function paintStatic(): void {
+  staticPaintFrame = 0
+  const canvas = staticCanvasRef.value
+  if (!canvas) return
+  const project = toRaw(props.project)
+  scene = createFactoryRenderScene(canvas, project)
+  renderFactoryStaticCanvas(canvas, project, selectionState(), scene)
 }
 
+function scheduleStaticPaint(): void {
+  if (!staticPaintFrame) staticPaintFrame = window.requestAnimationFrame(paintStatic)
+}
 
+function animateItems(time: number): void {
+  animationFrame = window.requestAnimationFrame(animateItems)
+  if (document.visibilityState === 'hidden') return
+  const canvas = dynamicCanvasRef.value
+  const staticCanvas = staticCanvasRef.value
+  if (!canvas || !staticCanvas) return
+  if (props.project.tick !== lastTick) {
+    lastTick = props.project.tick
+    tickStartedAt = time
+  }
+  const project = toRaw(props.project)
+  if (!scene) scene = createFactoryRenderScene(staticCanvas, project)
+  const stepMs = SIMULATION_STEP_MS / Math.max(1, props.project.speed)
+  const renderAlpha = props.project.running ? Math.min(1, Math.max(0, (time - tickStartedAt) / stepMs)) : 0
+  renderFactoryDynamicCanvas(canvas, project, renderAlpha, scene)
+}
 function point(event: MouseEvent): { x: number; y: number } {
   const rect = (event.target as HTMLCanvasElement).getBoundingClientRect()
   return { x: event.clientX - rect.left, y: event.clientY - rect.top }
@@ -109,9 +152,14 @@ function onClick(event: MouseEvent): void {
     suppressClick.value = false
     return
   }
+  const cell = cellFromEvent(event)
+  if (props.project.activeTool === 'paste-blueprint') {
+    emit('place', cell)
+    return
+  }
   const clicked = entityAtPoint(props.project, point(event))
   if (clicked) emit('select', clicked.id)
-  else emit('place', cellFromEvent(event))
+  else emit('place', cell)
 }
 
 function onDown(event: MouseEvent): void {
@@ -122,7 +170,7 @@ function onDown(event: MouseEvent): void {
     panStart = { x: event.clientX, y: event.clientY, viewport: { ...props.project.viewport } }
     return
   }
-  if (event.button !== 0) return
+  if (event.button !== 0 || props.project.activeTool === 'paste-blueprint') return
   dragStart.value = screenToGrid(currentPoint, props.project.viewport)
   dragEnd.value = dragStart.value
   isDragging.value = true
@@ -135,12 +183,12 @@ function onMove(event: MouseEvent): void {
       x: panStart.viewport.x + event.clientX - panStart.x,
       y: panStart.viewport.y + event.clientY - panStart.y
     })
-    schedulePaint()
+    scheduleStaticPaint()
     return
   }
   hoverCell.value = cellFromEvent(event)
   if (isDragging.value) dragEnd.value = hoverCell.value
-  schedulePaint()
+  scheduleStaticPaint()
 }
 
 function onUp(event: MouseEvent): void {
@@ -151,14 +199,23 @@ function onUp(event: MouseEvent): void {
   }
   if (!isDragging.value || !dragStart.value) return
   const end = cellFromEvent(event)
-  const moved = dragStart.value.x !== end.x || dragStart.value.y !== end.y
   const start = dragStart.value
+  const moved = start.x !== end.x || start.y !== end.y
   const direction = props.project.activeDirection
   isDragging.value = false
   dragStart.value = undefined
   dragEnd.value = undefined
-  if (moved && ['belt', 'tunnel'].includes(props.project.activeTool)) emit('dragBelt', start, end, direction)
-  schedulePaint()
+
+  let handledDrag = false
+  if (['copy-area', 'delete-area', 'upgrade-area'].includes(props.project.activeTool)) {
+    emit('areaAction', start, end)
+    handledDrag = true
+  } else if (moved && ['belt', 'fast-belt', 'tunnel'].includes(props.project.activeTool)) {
+    emit('dragBelt', start, end, direction)
+    handledDrag = true
+  }
+  suppressClick.value = handledDrag
+  scheduleStaticPaint()
 }
 
 function onLeave(): void {
@@ -168,16 +225,15 @@ function onLeave(): void {
   dragEnd.value = undefined
   isPanning.value = false
   panStart = undefined
-  schedulePaint()
+  scheduleStaticPaint()
 }
 
 function onDelete(event: MouseEvent): void {
-  if (isPanning.value || isSpaceDown.value) return
-  emit('deleteCell', cellFromEvent(event))
+  if (!isPanning.value && !isSpaceDown.value) emit('deleteCell', cellFromEvent(event))
 }
 
 function onWheel(event: WheelEvent): void {
-  const canvas = canvasRef.value
+  const canvas = staticCanvasRef.value
   if (!canvas) return
   const rect = canvas.getBoundingClientRect()
   const mouse = { x: event.clientX - rect.left, y: event.clientY - rect.top }
@@ -188,7 +244,7 @@ function onWheel(event: WheelEvent): void {
     x: mouse.x - before.x * 46 * nextZoom,
     y: mouse.y - before.y * 46 * nextZoom
   })
-  schedulePaint()
+  scheduleStaticPaint()
 }
 
 function onKeyDown(event: KeyboardEvent): void {
@@ -207,24 +263,28 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 watch(
-  () => [props.project.tick, props.project.renderAlpha, props.project.entities.length, props.project.errors.length, props.selectedEntityId, props.project.activeTool, props.project.activeDirection, props.project.viewport.x, props.project.viewport.y, props.project.viewport.zoom],
-  schedulePaint,
-  { deep: true }
+  () => [
+    topologySignature.value, props.selectedEntityId, props.project.activeTool,
+    props.project.activeDirection, props.project.viewport.x, props.project.viewport.y,
+    props.project.viewport.zoom, props.project.performance.quality
+  ],
+  scheduleStaticPaint
 )
-
-
-watch(preview, schedulePaint, { deep: true })
+watch(preview, scheduleStaticPaint, { deep: true })
+watch(areaPreview, scheduleStaticPaint, { deep: true })
 
 onMounted(() => {
-  paint()
-  window.addEventListener('resize', schedulePaint)
+  paintStatic()
+  animationFrame = window.requestAnimationFrame(animateItems)
+  window.addEventListener('resize', scheduleStaticPaint)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
 })
 
 onBeforeUnmount(() => {
-  if (paintFrame) window.cancelAnimationFrame(paintFrame)
-  window.removeEventListener('resize', schedulePaint)
+  if (staticPaintFrame) window.cancelAnimationFrame(staticPaintFrame)
+  if (animationFrame) window.cancelAnimationFrame(animationFrame)
+  window.removeEventListener('resize', scheduleStaticPaint)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
 })
