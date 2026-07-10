@@ -1,5 +1,7 @@
 import { buildingById } from '../../data/machines'
+import { assemblerRecipes, furnaceRecipes, recipeById } from '../../data/recipes'
 import { nextPosition, cloneProject } from '../../data/examples'
+import { machinePortRoles } from '../../render/factoryAssets'
 import type {
   BuildingType,
   Direction,
@@ -11,7 +13,8 @@ import type {
   ShapeId,
   ShapeItem,
   SimulationEvent,
-  TickResult
+  TickResult,
+  RecipeDefinition
 } from '../../models/factory'
 
 interface TickAccumulator {
@@ -115,6 +118,10 @@ function updateRouter(project: FactoryProject, entity: FactoryEntity): void {
 }
 
 function updateMachine(entity: FactoryEntity, project: FactoryProject, accumulator: TickAccumulator): void {
+  if (entity.type === 'furnace' || entity.type === 'assembler') {
+    updateRecipeMachine(entity, project, accumulator)
+    return
+  }
   if (!entity.input.length) {
     entity.status = 'waiting'
     return
@@ -137,6 +144,43 @@ function updateMachine(entity: FactoryEntity, project: FactoryProject, accumulat
   entity.progress = 0
   entity.output.push(createItem(transformed, project.tick))
   increment(accumulator.produced, transformed, 1)
+}
+
+function updateRecipeMachine(entity: FactoryEntity, project: FactoryProject, accumulator: TickAccumulator): void {
+  if (entity.output.length >= 1) {
+    entity.status = 'blocked'
+    return
+  }
+  const recipe = activeRecipe(entity)
+  if (!recipe || !hasRecipeInputs(entity, recipe)) {
+    entity.status = 'waiting'
+    entity.progress = 0
+    return
+  }
+
+  entity.progress += 1
+  entity.status = 'running'
+  if (entity.progress < recipe.durationTicks) return
+
+  recipe.inputs.forEach((ingredient) => {
+    for (let count = 0; count < ingredient.amount; count += 1) consumeFirst(entity, ingredient.shape)
+  })
+  entity.progress = 0
+  entity.output.push(createItem(recipe.output, project.tick))
+  increment(accumulator.produced, recipe.output, 1)
+}
+
+function activeRecipe(entity: FactoryEntity): RecipeDefinition | undefined {
+  if (entity.type === 'furnace') {
+    return furnaceRecipes.find((recipe) => hasRecipeInputs(entity, recipe))
+      ?? furnaceRecipes.find((recipe) => recipe.inputs.some((ingredient) => entity.input.some((item) => item.shape === ingredient.shape)))
+  }
+  if (entity.type === 'assembler') return recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
+  return undefined
+}
+
+function hasRecipeInputs(entity: FactoryEntity, recipe: RecipeDefinition): boolean {
+  return recipe.inputs.every((ingredient) => entity.input.filter((item) => item.shape === ingredient.shape).length >= ingredient.amount)
 }
 
 function updateBelts(project: FactoryProject): void {
@@ -197,10 +241,16 @@ function canAccept(project: FactoryProject, entity: FactoryEntity, item: ShapeIt
   if (entity.type === 'trash') return entity.input.length < 1
   if (entity.type === 'splitter') return entity.input.length < 1 && (!incoming || incoming === oppositeDirection(entity.direction))
   if (ROUTER_TYPES.includes(entity.type)) return entity.input.length < 1
-  if (entity.kind === 'processor') return entity.input.length < inputCapacity(entity.type) && acceptsShape(entity.type, item.shape)
+  if (entity.kind === 'processor') return acceptsIncomingPort(entity, incoming, item.shape) && hasInputRoom(entity, item.shape) && acceptsShape(entity, item.shape)
   return false
 }
 
+
+function acceptsIncomingPort(entity: FactoryEntity, incoming?: Direction, shape?: ShapeId): boolean {
+  if (!incoming) return true
+  if (entity.type === 'furnace' && shape) return acceptsFurnacePort(entity, incoming, shape)
+  return machinePortRoles(entity).some((port) => port.role === 'input' && port.direction === incoming)
+}
 function acceptItem(
   project: FactoryProject,
   entity: FactoryEntity,
@@ -281,18 +331,56 @@ function transformShape(type: FactoryEntity['type'], shape: ShapeId): ShapeId {
   return shape
 }
 
-function acceptsShape(type: FactoryEntity['type'], shape: ShapeId): boolean {
-  if (type === 'painter-red') return shape === 'circle'
-  if (type === 'painter-blue') return shape === 'square' || shape === 'diamond'
-  if (type === 'painter-green') return shape === 'star'
-  if (type === 'stacker') return ['circle-red', 'square', 'square-blue', 'diamond', 'star', 'star-green'].includes(shape)
+function acceptsFurnacePort(entity: FactoryEntity, incoming: Direction, shape: ShapeId): boolean {
+  const oreInput = oppositeDirection(entity.direction)
+  const fuelInput = rotateCounterClockwise(entity.direction)
+  if (incoming === oreInput) return isFurnaceOre(shape)
+  if (incoming === fuelInput) return isFurnaceFuel(shape)
+  return false
+}
+
+function hasInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
+  if (entity.type === 'furnace') return hasFurnaceInputRoom(entity, shape)
+  return entity.input.length < inputCapacity(entity)
+}
+
+function hasFurnaceInputRoom(entity: FactoryEntity, shape: ShapeId): boolean {
+  if (!acceptsShape(entity, shape)) return false
+  const sameShapeCount = entity.input.filter((item) => item.shape === shape).length
+  if (isFurnaceFuel(shape)) return sameShapeCount < 2
+  if (isFurnaceOre(shape)) return sameShapeCount < 2
+  return false
+}
+
+function isFurnaceOre(shape: ShapeId): boolean {
+  return shape === 'iron-ore' || shape === 'copper-ore'
+}
+
+function isFurnaceFuel(shape: ShapeId): boolean {
+  return shape === 'coal-ore'
+}
+function acceptsShape(entity: FactoryEntity, shape: ShapeId): boolean {
+  if (entity.type === 'painter-red') return shape === 'circle'
+  if (entity.type === 'painter-blue') return shape === 'square' || shape === 'diamond'
+  if (entity.type === 'painter-green') return shape === 'star'
+  if (entity.type === 'stacker') return ['circle-red', 'square', 'square-blue', 'diamond', 'star', 'star-green'].includes(shape)
+  if (entity.type === 'furnace') return furnaceRecipes.some((recipe) => recipe.inputs.some((ingredient) => ingredient.shape === shape))
+  if (entity.type === 'assembler') {
+    const recipe = recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
+    return recipe.inputs.some((ingredient) => ingredient.shape === shape)
+  }
   return true
 }
 
-function inputCapacity(type: FactoryEntity['type']): number {
-  return type === 'stacker' ? 2 : 1
+function inputCapacity(entity: FactoryEntity): number {
+  if (entity.type === 'stacker') return 2
+  if (entity.type === 'furnace') return 4
+  if (entity.type === 'assembler') {
+    const recipe = recipeById[entity.recipeId ?? 'gear'] ?? assemblerRecipes[0]
+    return recipe.inputs.reduce((sum, ingredient) => sum + ingredient.amount, 0) + 2
+  }
+  return 1
 }
-
 function detectErrors(project: FactoryProject): FactoryError[] {
   const errors: FactoryError[] = []
   project.entities.forEach((entity) => {

@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <span class="machine-icon" :class="[type, toneClass]" aria-hidden="true">
     <span class="icon-plate">
       <span class="icon-core"></span>

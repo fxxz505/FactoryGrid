@@ -1,4 +1,4 @@
-﻿import { buildingById } from './machines'
+import { buildingById } from './machines'
 import type { BuildingType, Direction, FactoryEntity, FactoryProject, ShapeId } from '../models/factory'
 
 let entityCounter = 0
@@ -16,7 +16,8 @@ export function createEntity(overrides: Partial<FactoryEntity> & Pick<FactoryEnt
     input: overrides.input ?? [],
     output: overrides.output ?? [],
     progress: overrides.progress ?? 0,
-    status: overrides.status ?? 'idle'
+    status: overrides.status ?? 'idle',
+    recipeId: overrides.recipeId ?? defaultRecipeFor(type)
   }
 }
 
@@ -32,6 +33,14 @@ function sourceShapeFor(type: BuildingType): ShapeId | undefined {
   if (type === 'source-square') return 'square'
   if (type === 'source-star') return 'star'
   if (type === 'source-diamond') return 'diamond'
+  if (type === 'source-iron') return 'iron-ore'
+  if (type === 'source-coal') return 'coal-ore'
+  if (type === 'source-copper') return 'copper-ore'
+  return undefined
+}
+
+function defaultRecipeFor(type: BuildingType): string | undefined {
+  if (type === 'assembler') return 'gear'
   return undefined
 }
 
@@ -94,6 +103,9 @@ export function createShapezProject(): FactoryProject {
       'source-square',
       'source-star',
       'source-diamond',
+      'source-iron',
+      'source-coal',
+      'source-copper',
       'belt',
       'splitter',
       'merger',
@@ -105,6 +117,8 @@ export function createShapezProject(): FactoryProject {
       'painter-blue',
       'painter-green',
       'stacker',
+      'furnace',
+      'assembler',
       'trash',
       'hub'
     ],

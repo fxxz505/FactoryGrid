@@ -54,7 +54,7 @@
           </button>
           <button class="tool-row danger-tool" :class="{ active: project.activeTool === 'delete' }" type="button" @click="selectTool('delete')">
             <span class="tool-glyph">&#21024;</span>
-            <span><strong>&#31227;&#21160;&#30011;&#24067;</strong><small>&#25302;&#21160;&#35270;&#35282;&#65292;&#19981;&#25918;&#32622;&#24314;&#31569;&#12290;</small></span>
+            <span><strong>&#25286;&#38500;&#24314;&#31569;</strong><small>&#28857;&#20987;&#26684;&#23376;&#21024;&#38500;&#24314;&#31569;&#12290;</small></span>
           </button>
         </section>
 
@@ -78,10 +78,37 @@
           @drag-belt="handleDragBelt"
           @delete-cell="handleDeleteCell"
           @viewport-change="handleViewportChange"
+          @configure-assembler="openAssemblerRecipes"
         />
         <SimulationBar :metrics="project.metrics" :errors="project.errors" :events="project.events" />
       </section>
     </section>
+    <div v-if="recipePanelEntity" class="recipe-overlay" @click.self="closeRecipePanel">
+      <section class="recipe-panel" role="dialog" aria-modal="true" aria-label="&#21512;&#25104;&#22120;&#37197;&#26041;">
+        <div class="panel-heading">
+          <h2>&#21512;&#25104;&#37197;&#26041;</h2>
+          <span>{{ recipePanelEntity?.label }}</span>
+        </div>
+        <button
+          v-for="recipe in assemblerRecipes"
+          :key="recipe.id"
+          class="recipe-choice"
+          :class="{ active: recipePanelEntity?.recipeId === recipe.id }"
+          type="button"
+          @click="selectAssemblerRecipe(recipe.id)"
+        >
+          <span class="recipe-shapes">
+            <i v-for="ingredient in recipe.inputs" :key="ingredient.shape" :style="{ background: shapeById[ingredient.shape]?.color }"></i>
+            <b :style="{ background: shapeById[recipe.output]?.color }"></b>
+          </span>
+          <span>
+            <strong>{{ recipe.name }}</strong>
+            <small>{{ recipe.description }}</small>
+          </span>
+        </button>
+        <button class="wide-action" type="button" @click="closeRecipePanel">&#20851;&#38381;</button>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -93,13 +120,15 @@ import SimulationBar from '../components/editor/SimulationBar.vue'
 import MachineIcon from '../components/editor/MachineIcon.vue'
 import { buildings, buildingById } from '../data/machines'
 import { shapeById } from '../data/resources'
+import { assemblerRecipes } from '../data/recipes'
 import { createShapezProject, createEntity } from '../data/examples'
 import { runTick } from '../engine/simulation/tickEngine'
 import { buildBeltLine, deleteAt, placeBuilding, rotateDirection, rotateSelectedEntity, undo } from '../engine/simulation/editorActions'
-import type { BuildingType, Direction, FactoryProject, GridPosition, ToolId, ViewportState } from '../models/factory'
+import type { BuildingType, Direction, FactoryEntity, FactoryProject, GridPosition, ToolId, ViewportState } from '../models/factory'
 
 const STORAGE_KEY = 'factorygrid-shapez-v4'
 const project = reactive(loadProject())
+const recipePanel = reactive<{ entityId?: string }>({})
 let frameHandle = 0
 let lastFrameTime = 0
 let simAccumulator = 0
@@ -110,18 +139,41 @@ const SIMULATION_STEP_MS = 170
 
 const visibleBuildings = computed(() => buildings.filter((building) => project.unlocked.includes(building.id)))
 const activeToolName = computed(() => project.activeTool === 'delete' ? '\u62c6\u9664' : project.activeTool === 'pan' ? '\u79fb\u52a8\u753b\u5e03' : buildingById[project.activeTool]?.name ?? project.activeTool)
+const recipePanelEntity = computed<FactoryEntity | undefined>(() => project.entities.find((entity) => entity.id === recipePanel.entityId && entity.type === 'assembler'))
 
 function loadProject(): FactoryProject {
   const saved = localStorage.getItem(STORAGE_KEY)
   if (!saved) return createShapezProject()
   try {
     const parsed = JSON.parse(saved) as FactoryProject
-    return parsed.goals && parsed.unlocked && parsed.viewport ? { ...parsed, renderAlpha: parsed.renderAlpha ?? 0 } : createShapezProject()
+    return parsed.goals && parsed.unlocked && parsed.viewport ? hydrateSavedProject(parsed) : createShapezProject()
   } catch {
     return createShapezProject()
   }
 }
 
+function hydrateSavedProject(saved: FactoryProject): FactoryProject {
+  const available = buildings.map((building) => building.id)
+  const availableSet = new Set<BuildingType>(available)
+  const entities = saved.entities.filter((entity) => availableSet.has(entity.type))
+  const entityIds = new Set(entities.map((entity) => entity.id))
+  const belts = Object.fromEntries(
+    Object.entries(saved.belts ?? {}).filter(([id]) => entityIds.has(id))
+  )
+  const unlocked = Array.from(new Set([...saved.unlocked, ...available])).filter((type) => availableSet.has(type))
+  return {
+    ...saved,
+    renderAlpha: saved.renderAlpha ?? 0,
+    unlocked,
+    entities,
+    belts,
+    activeTool: isKnownTool(saved.activeTool) ? saved.activeTool : 'belt'
+  }
+}
+
+function isKnownTool(tool: ToolId): boolean {
+  return tool === 'select' || tool === 'pan' || tool === 'delete' || buildings.some((building) => building.id === tool)
+}
 function replaceProject(next: FactoryProject, persist = true): void {
   Object.assign(project, next)
   if (persist) saveProject()
@@ -206,6 +258,24 @@ function handleViewportChange(viewport: ViewportState): void {
   scheduleSaveProject()
 }
 
+
+function openAssemblerRecipes(id: string): void {
+  project.selectedEntityId = id
+  recipePanel.entityId = id
+}
+
+function closeRecipePanel(): void {
+  recipePanel.entityId = undefined
+}
+
+function selectAssemblerRecipe(recipeId: string): void {
+  const entity = project.entities.find((candidate) => candidate.id === recipePanel.entityId && candidate.type === 'assembler')
+  if (!entity) return
+  entity.recipeId = recipeId
+  entity.progress = 0
+  saveProject()
+  closeRecipePanel()
+}
 function saveBlueprint(): void {
   const entityIds = project.entities.filter((entity) => entity.type !== 'hub').slice(0, 10).map((entity) => entity.id)
   project.blueprints.unshift({

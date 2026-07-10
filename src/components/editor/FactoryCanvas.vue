@@ -17,6 +17,7 @@
       :class="{ panning: isPanning || project.activeTool === 'pan', previewing: Boolean(preview) }"
       data-testid="factory-canvas"
       @click="onClick"
+      @dblclick="onDoubleClick"
       @mousedown="onDown"
       @mousemove="onMove"
       @mouseup="onUp"
@@ -45,6 +46,7 @@ const emit = defineEmits<{
   dragBelt: [start: GridPosition, end: GridPosition, direction: Direction]
   deleteCell: [cell: GridPosition]
   viewportChange: [viewport: ViewportState]
+  configureAssembler: [id: string]
 }>()
 
 const canvasRef = ref<HTMLCanvasElement>()
@@ -95,6 +97,11 @@ function point(event: MouseEvent): { x: number; y: number } {
 
 function cellFromEvent(event: MouseEvent): GridPosition {
   return screenToGrid(point(event), props.project.viewport)
+}
+
+function onDoubleClick(event: MouseEvent): void {
+  const clicked = entityAtPoint(props.project, point(event))
+  if (clicked?.type === 'assembler') emit('configureAssembler', clicked.id)
 }
 
 function onClick(event: MouseEvent): void {

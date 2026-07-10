@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createShapezProject } from '../../src/data/examples'
 import { buildBeltLine } from '../../src/engine/simulation/editorActions'
-import { machineGeometryFor, planBeltSprite } from '../../src/render/factoryAssets'
+import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite } from '../../src/render/factoryAssets'
 import { buildings } from '../../src/data/machines'
+import type { FactoryEntity } from '../../src/models/factory'
 
 describe('factory geometric rendering contract', () => {
   it('maps every available machine to a local geometric style instead of image assets', () => {
@@ -52,5 +53,25 @@ describe('factory geometric rendering contract', () => {
     expect(plan.kind).toBe('corner')
     expect(plan.direction).toBe('south')
     expect(plan.connections).toEqual(['south', 'west'])
+  })
+
+  it('exposes furnace and assembler as multi-port machines with input and output roles', () => {
+    const project = createShapezProject()
+    const furnace: FactoryEntity = { id: 'furnace-test', kind: 'processor', type: 'furnace', label: 'furnace', position: { x: 0, y: 0 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }
+    const assembler: FactoryEntity = { id: 'assembler-test', kind: 'processor', type: 'assembler', label: 'assembler', position: { x: 0, y: 2 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }
+
+    expect(machinePortRoles(furnace)).toEqual([
+      { direction: 'east', role: 'output' },
+      { direction: 'west', role: 'input' },
+      { direction: 'north', role: 'input' }
+    ])
+    expect(entityConnectionDirections(project, furnace)).toEqual(['north', 'east', 'west'])
+    expect(machinePortRoles(assembler)).toEqual([
+      { direction: 'east', role: 'output' },
+      { direction: 'west', role: 'input' },
+      { direction: 'north', role: 'input' },
+      { direction: 'south', role: 'input' }
+    ])
+    expect(entityConnectionDirections(project, assembler)).toEqual(['north', 'east', 'south', 'west'])
   })
 })

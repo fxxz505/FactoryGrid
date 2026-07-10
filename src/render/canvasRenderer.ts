@@ -1,6 +1,6 @@
 import { shapeById } from '../data/resources'
 import type { BeltPreview, Direction, FactoryEntity, FactoryProject, GridPosition, ShapeId, ViewportState } from '../models/factory'
-import { entityConnectionDirections, machineGeometryFor, planBeltSprite, type BeltSpritePlan, type MachineGeometryStyle } from './factoryAssets'
+import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite, type BeltSpritePlan, type MachineGeometryStyle, type MachinePort } from './factoryAssets'
 
 export const CELL = 46
 export const DEFAULT_VIEWPORT: ViewportState = { x: 130, y: 88, zoom: 1 }
@@ -320,6 +320,7 @@ function drawMachineConnector(ctx: CanvasRenderingContext2D, project: FactoryPro
   const track = size * 0.62
   const rimTrack = track + size * 0.12
   const directions = entityConnectionDirections(project, entity)
+  const ports = machinePortRoles(entity)
 
   ctx.save()
   ctx.lineJoin = 'round'
@@ -331,7 +332,41 @@ function drawMachineConnector(ctx: CanvasRenderingContext2D, project: FactoryPro
   ctx.strokeStyle = '#9ea5a9'
   ctx.lineWidth = Math.max(1.2, size * 0.03)
   directions.forEach((direction) => drawConnectorRail(ctx, cx, cy, x, y, size, direction, track))
+  drawMachinePortCaps(ctx, ports, x, y, size)
   ctx.restore()
+}
+
+function drawMachinePortCaps(ctx: CanvasRenderingContext2D, ports: MachinePort[], x: number, y: number, size: number): void {
+  ports.forEach((port) => {
+    const center = portCapCenter(x, y, size, port.direction)
+    const long = port.role === 'output' ? size * 0.26 : size * 0.18
+    const short = port.role === 'output' ? size * 0.12 : size * 0.16
+    ctx.save()
+    ctx.translate(center.x, center.y)
+    ctx.rotate(directionToRotation(port.direction))
+    ctx.fillStyle = port.role === 'output' ? '#f7f1e6' : '#879196'
+    ctx.strokeStyle = port.role === 'output' ? '#9ba3a6' : '#687277'
+    ctx.lineWidth = Math.max(1, size * 0.018)
+    roundedRectPath(ctx, -long / 2, -short / 2, long, short, size * 0.025)
+    ctx.fill()
+    ctx.stroke()
+    if (port.role === 'input') {
+      ctx.fillStyle = 'rgba(38,52,59,0.24)'
+      ctx.fillRect(-long * 0.32, -short * 0.16, long * 0.64, short * 0.32)
+    } else {
+      ctx.fillStyle = 'rgba(208,112,72,0.22)'
+      ctx.fillRect(long * 0.08, -short * 0.22, long * 0.28, short * 0.44)
+    }
+    ctx.restore()
+  })
+}
+
+function portCapCenter(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
+  const inset = size * 0.11
+  if (direction === 'east') return { x: x + size - inset, y: y + size / 2 }
+  if (direction === 'west') return { x: x + inset, y: y + size / 2 }
+  if (direction === 'south') return { x: x + size / 2, y: y + size - inset }
+  return { x: x + size / 2, y: y + inset }
 }
 
 function drawConnectorArm(ctx: CanvasRenderingContext2D, cx: number, cy: number, x: number, y: number, size: number, direction: Direction, track: number): void {
@@ -604,11 +639,19 @@ function directionToRotation(direction: Direction): number {
 function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: number, radius: number): void {
   const def = shapeById[shape]
   const fill = def?.color ?? '#222'
+  const useAccent = !!def?.accent && shouldUseShapeAccent(shape)
   ctx.save()
   ctx.fillStyle = fill
   ctx.beginPath()
 
-  if (shape.includes('square')) {
+  if (isBasicCircleShape(shape)) {
+    ctx.arc(x, y, radius, 0, Math.PI * 2)
+  } else if (isBasicTriangleShape(shape)) {
+    ctx.moveTo(x, y - radius * 1.2)
+    ctx.lineTo(x + radius * 1.12, y + radius * 0.9)
+    ctx.lineTo(x - radius * 1.12, y + radius * 0.9)
+    ctx.closePath()
+  } else if (shape.includes('square')) {
     ctx.rect(x - radius, y - radius, radius * 2, radius * 2)
   } else if (shape.includes('diamond')) {
     ctx.moveTo(x, y - radius * 1.25)
@@ -630,16 +673,35 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: 
   ctx.lineWidth = Math.max(1, radius * 0.09)
   ctx.stroke()
 
-  if (def?.accent) {
-    ctx.beginPath()
-    ctx.rect(x, y - radius, radius, radius * 2)
-    ctx.clip()
-    ctx.fillStyle = def.accent
-    ctx.fill()
+  if (useAccent) {
+    const accent = def?.accent
+    if (accent) {
+      ctx.beginPath()
+      ctx.rect(x, y - radius, radius, radius * 2)
+      ctx.clip()
+      ctx.fillStyle = accent
+      ctx.fill()
+    }
   }
 
   ctx.restore()
 }
+
+const basicCircleShapes: ShapeId[] = ['iron-ore', 'coal-ore', 'copper-ore']
+const basicTriangleShapes: ShapeId[] = ['iron-ingot', 'copper-ingot', 'iron-gear', 'copper-wire', 'circuit']
+
+function isBasicCircleShape(shape: ShapeId): boolean {
+  return basicCircleShapes.includes(shape)
+}
+
+function isBasicTriangleShape(shape: ShapeId): boolean {
+  return basicTriangleShapes.includes(shape)
+}
+
+function shouldUseShapeAccent(shape: ShapeId): boolean {
+  return !isBasicCircleShape(shape) && !isBasicTriangleShape(shape)
+}
+
 function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
   ctx.beginPath()
   for (let i = 0; i < 10; i += 1) {

@@ -6,6 +6,87 @@ import { entityConnectionDirections } from '../../src/render/factoryAssets'
 
 describe('shape factory simulation', () => {
 
+
+  it('produces ore test materials from the three mineral generators', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'source-iron', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'source-coal', { x: 0, y: 2 }, 'east')
+    project = placeBuilding(project, 'source-copper', { x: 0, y: 4 }, 'east')
+
+    const result = runTicks(project, 14)
+
+    expect(result.metrics.produced['iron-ore']).toBeGreaterThanOrEqual(1)
+    expect(result.metrics.produced['coal-ore']).toBeGreaterThanOrEqual(1)
+    expect(result.metrics.produced['copper-ore']).toBeGreaterThanOrEqual(1)
+  })
+
+  it('keeps furnace ore and fuel ports distinct while waiting for matching inputs', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'furnace', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'source-coal', { x: -1, y: 0 }, 'east')
+    project = placeBuilding(project, 'source-iron', { x: 0, y: -1 }, 'south')
+
+    const wrongPorts = runTicks(project, 18)
+    const wrongFurnace = wrongPorts.entities.find((entity) => entity.type === 'furnace')!
+
+    expect(wrongFurnace.input).toHaveLength(0)
+    expect(wrongFurnace.output).toHaveLength(0)
+
+    project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'furnace', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'source-iron', { x: -1, y: 0 }, 'east')
+    project = placeBuilding(project, 'source-coal', { x: 0, y: -1 }, 'south')
+
+    const rightPorts = runTicks(project, 60)
+    const rightFurnace = rightPorts.entities.find((entity) => entity.type === 'furnace')!
+
+    expect(rightFurnace.output[0]?.shape).toBe('iron-ingot')
+    expect(rightPorts.metrics.produced['iron-ingot']).toBe(1)
+  })
+  it('smelts ore with coal in a furnace and outputs ingots only after both inputs arrive', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'furnace', { x: 0, y: 0 }, 'east')
+    const furnace = project.entities.find((entity) => entity.type === 'furnace')!
+    furnace.input.push({ id: 'iron', shape: 'iron-ore', age: 0 })
+
+    const missingFuel = runTicks(project, 40)
+    expect(missingFuel.entities.find((entity) => entity.type === 'furnace')?.output).toHaveLength(0)
+
+    const fueled = missingFuel.entities.find((entity) => entity.type === 'furnace')!
+    fueled.input.push({ id: 'coal', shape: 'coal-ore', age: 0 })
+    const result = runTicks(missingFuel, 40)
+
+    expect(result.entities.find((entity) => entity.type === 'furnace')?.output[0]?.shape).toBe('iron-ingot')
+    expect(result.metrics.produced['iron-ingot']).toBe(1)
+  })
+
+  it('uses the selected assembler recipe to craft different products', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+
+    project = placeBuilding(project, 'assembler', { x: 0, y: 0 }, 'east')
+    const assembler = project.entities.find((entity) => entity.type === 'assembler')!
+    assembler.recipeId = 'wire'
+    assembler.input.push({ id: 'copper', shape: 'copper-ingot', age: 0 })
+
+    const result = runTicks(project, 24)
+
+    expect(result.entities.find((entity) => entity.type === 'assembler')?.output[0]?.shape).toBe('copper-wire')
+    expect(result.metrics.produced['copper-wire']).toBe(1)
+  })
   it('keeps a render interpolation alpha separate from fixed simulation ticks', () => {
     const project = createShapezProject()
 
@@ -388,6 +469,7 @@ describe('shape factory simulation', () => {
     expect(result.belts[belt.id].enteredTick).toBe(result.belts[belt.id].lastMovedTick)
     expect(result.belts[belt.id].enteredTick).toBeGreaterThan(0)
   })
+
   it('rotates belt direction clockwise', () => {
     expect(rotateDirection('north')).toBe('east')
     expect(rotateDirection('east')).toBe('south')

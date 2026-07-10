@@ -52,7 +52,7 @@ test('machines use simple geometric language without text labels or image assets
   await expect(canvas).toBeVisible()
   await expect(page.locator('.tool-row svg')).toHaveCount(1)
   await expect(page.locator('.machine-icon img')).toHaveCount(0)
-  await expect(page.locator('.machine-icon .icon-core')).toHaveCount(17)
+  await expect(page.locator('.machine-icon .icon-core')).toHaveCount(22)
   await expect(page.locator('canvas')).not.toContainText('\u67a2')
   expect(assetRequests).toEqual([])
 })
@@ -61,8 +61,77 @@ test('machines use simple geometric language without text labels or image assets
 
 
 
-test('R rotates the selected machine instead of only rotating the build tool', async ({ page }) => {
+
+
+test('legacy saves omit removed container and inserter tools with clean delete labels', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('factorygrid-shapez-v4', JSON.stringify({
+      id: 'legacy-save',
+      name: 'legacy save',
+      tick: 0,
+      running: false,
+      renderAlpha: 0,
+      speed: 2,
+      activeTool: 'belt',
+      activeDirection: 'east',
+      viewport: { x: 150, y: 88, zoom: 1 },
+      goals: [],
+      unlocked: ['belt', 'rotator', 'container', 'inserter'],
+      entities: [],
+      belts: {},
+      metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+      errors: [],
+      events: [],
+      blueprints: [],
+      history: []
+    }))
+  })
+
   await page.goto('/')
+
+  await expect(page.getByRole('button', { name: new RegExp('^\\u50a8\\u7269\\u7bb1') })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: new RegExp('^\\u673a\\u68b0\\u81c2') })).toHaveCount(0)
+  await expect(page.locator('.danger-tool')).toContainText('\u62c6\u9664\u5efa\u7b51')
+  await expect(page.locator('.danger-tool')).toContainText('\u70b9\u51fb\u683c\u5b50\u5220\u9664\u5efa\u7b51')
+  await expect(page.locator('.danger-tool')).not.toContainText('\u79fb\u52a8\u753b\u5e03')
+})
+
+
+test('ore generators furnace and assembler are available with recipe selection UI', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: /^\u94c1\u77ff\u53d1\u751f\u5668/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^\u7164\u77ff\u53d1\u751f\u5668/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^\u94dc\u77ff\u53d1\u751f\u5668/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^\u7194\u7089/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^\u5408\u6210\u5668/ })).toBeVisible()
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.getByRole('button', { name: /^\u5408\u6210\u5668/ }).click()
+  await canvas.click({ position: { x: 500, y: 240 } })
+  await canvas.dblclick({ position: { x: 500, y: 240 } })
+
+  await expect(page.locator('.recipe-panel')).toBeVisible()
+  await expect(page.locator('.recipe-choice')).toContainText(['\u9f7f\u8f6e', '\u94dc\u7ebf', '\u7b80\u6613\u7535\u8def'])
+})
+
+
+test('furnace and assembler use geometric multi-port caps without text labels', async () => {
+  const assets = await import('node:fs/promises').then((fs) => fs.readFile('src/render/factoryAssets.ts', 'utf8'))
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+
+  expect(assets).toContain("entity.type === 'furnace'")
+  expect(assets).toContain("entity.type === 'assembler'")
+  expect(renderer).toContain('function drawMachinePortCaps')
+  expect(renderer).not.toContain('fillText')
+  expect(renderer).not.toContain('输入')
+  expect(renderer).not.toContain('输出')
+})
+
+test('R remains a rotate shortcut and is not assigned to a machine tool', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.tool-row').filter({ hasText: /^\u65cb\u8f6c\u5668/ })).not.toContainText(/^R\s*\//)
   const canvas = page.getByTestId('factory-canvas')
   await page.locator('.tool-row').filter({ hasText: '\u5207\u5272\u673a' }).first().click()
   await canvas.click({ position: { x: 300, y: 240 } })
@@ -70,9 +139,9 @@ test('R rotates the selected machine instead of only rotating the build tool', a
   await page.keyboard.press('r')
   await page.waitForTimeout(120)
   const after = await canvas.screenshot()
+
   expect(Buffer.compare(before, after)).not.toBe(0)
 })
-
 test('belt design uses pale guide marks without arrow-shaped blue markers', async ({ page }) => {
   await page.goto('/')
   const canvas = page.getByTestId('factory-canvas')
@@ -191,6 +260,21 @@ test('conveyor animation uses one render clock and stable shape paths to avoid j
   expect(drawShape?.[0]).not.toContain('ctx.strokeRect')
 })
 
+test('ore and factory products render as basic circles or triangles only', async () => {
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  const drawShape = renderer.match(/function drawShape[\s\S]*?function isBasicCircleShape/)
+
+  expect(renderer).toContain('const basicCircleShapes')
+  expect(renderer).toContain('const basicTriangleShapes')
+  expect(renderer).toContain('function shouldUseShapeAccent')
+  expect(renderer).toContain('const useAccent = !!def?.accent && shouldUseShapeAccent(shape)')
+  expect(drawShape?.[0]).toContain('isBasicCircleShape(shape)')
+  expect(drawShape?.[0]).toContain('isBasicTriangleShape(shape)')
+  expect(drawShape?.[0]).not.toContain("shape === 'iron-gear'")
+  expect(drawShape?.[0]).not.toContain("shape === 'copper-wire'")
+  expect(drawShape?.[0]).not.toContain("shape === 'circuit'")
+})
+
 test('canvas does not render the floating goal rail over the factory workspace', async () => {
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
 
@@ -204,8 +288,8 @@ test('pan tool labels and README stay clean Chinese for GitHub publishing', asyn
 
   expect(app).toContain('&#31227;&#21160;&#30011;&#24067;')
   expect(app).toContain('&#25302;&#21160;&#35270;&#35282;&#65292;&#19981;&#25918;&#32622;&#24314;&#31569;&#12290;')
-  expect(app).not.toMatch(/[�锟]/)
+  expect(app).not.toContain('\ufffd')
   expect(readme).toContain('# FactoryGrid')
-  expect(readme).not.toContain('## 开发约定')
-  expect(readme).not.toMatch(/[�锟]/)
+  expect(readme).not.toContain('## \u5f00\u53d1\u7ea6\u5b9a')
+  expect(readme).not.toContain('\ufffd')
 })

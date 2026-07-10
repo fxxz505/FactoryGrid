@@ -1,19 +1,27 @@
 import type { ShapeDefinition } from '../models/factory'
 
 export const shapes: ShapeDefinition[] = [
-  { id: 'circle', name: '\u5706\u5f62', code: '\u5706', color: '#65c7f7', description: '\u6765\u81ea\u5706\u5f62\u77ff\u8109\u7684\u57fa\u7840\u56fe\u5f62\u3002' },
-  { id: 'square', name: '\u65b9\u5f62', code: '\u65b9', color: '#f5c64f', description: '\u7528\u4e8e\u5207\u5272\u3001\u67d3\u8272\u4e0e\u5806\u53e0\u7684\u57fa\u7840\u56fe\u5f62\u3002' },
-  { id: 'star', name: '\u661f\u5f62', code: '\u661f', color: '#8ee86a', description: '\u9ad8\u7ea7\u76ee\u6807\u5e38\u7528\u56fe\u5f62\u3002' },
-  { id: 'diamond', name: '\u83f1\u5f62', code: '\u83f1', color: '#c690ff', description: '\u9ad8\u7ea7\u751f\u4ea7\u7ebf\u4e2d\u7684\u88c5\u9970\u56fe\u5f62\u3002' },
-  { id: 'half-circle', name: '\u534a\u5706', code: '\u534a\u5706', color: '#65c7f7', accent: '#dff6ff', description: '\u5706\u5f62\u7ecf\u8fc7\u5207\u5272\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'half-square', name: '\u534a\u65b9', code: '\u534a\u65b9', color: '#f5c64f', accent: '#fff3bf', description: '\u65b9\u5f62\u7ecf\u8fc7\u5207\u5272\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'circle-red', name: '\u7ea2\u5706', code: '\u7ea2\u5706', color: '#ee5d59', description: '\u5706\u5f62\u7ecf\u8fc7\u7ea2\u8272\u67d3\u8272\u5668\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'square-blue', name: '\u84dd\u65b9', code: '\u84dd\u65b9', color: '#568cff', description: '\u65b9\u5f62\u7ecf\u8fc7\u84dd\u8272\u67d3\u8272\u5668\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'star-green', name: '\u7eff\u661f', code: '\u7eff\u661f', color: '#60d971', description: '\u661f\u5f62\u7ecf\u8fc7\u7eff\u8272\u67d3\u8272\u5668\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'rotated-star', name: '\u65cb\u8f6c\u661f', code: '\u65cb\u661f', color: '#b2f27d', description: '\u661f\u5f62\u7ecf\u8fc7\u65cb\u8f6c\u5668\u540e\u7684\u4ea7\u7269\u3002' },
-  { id: 'circle-red+square', name: '\u7ea2\u5706\u53e0\u65b9', code: '\u7ea2\u5706+\u65b9', color: '#ee5d59', accent: '#f5c64f', description: '\u5806\u53e0\u5668\u7ec4\u5408\u51fa\u7684\u590d\u5408\u56fe\u5f62\u3002' },
-  { id: 'diamond-blue+star', name: '\u84dd\u83f1\u53e0\u661f', code: '\u84dd\u83f1+\u661f', color: '#568cff', accent: '#8ee86a', description: '\u9ad8\u7ea7\u5806\u53e0\u76ee\u6807\u3002' },
-  { id: 'trash', name: '\u5e9f\u6599', code: '\u5e9f', color: '#98a2b3', description: '\u88ab\u56de\u6536\u5668\u6e05\u7406\u7684\u6ea2\u51fa\u56fe\u5f62\u3002' }
+  { id: 'circle', name: '圆形', code: '圆', color: '#65c7f7', description: '来自圆形矿脉的基础图形。' },
+  { id: 'square', name: '方形', code: '方', color: '#f5c64f', description: '用于切割、染色与堆叠的基础图形。' },
+  { id: 'star', name: '星形', code: '星', color: '#8ee86a', description: '高级目标常用图形。' },
+  { id: 'diamond', name: '菱形', code: '菱', color: '#c690ff', description: '高级生产线中的装饰图形。' },
+  { id: 'iron-ore', name: '铁矿', code: '铁矿', color: '#d7ddd9', accent: '#9ca7a3', description: '灰白色圆形矿物，可与煤矿在熔炉中烧制。' },
+  { id: 'coal-ore', name: '煤矿', code: '煤', color: '#242424', accent: '#5c5c58', description: '黑色圆形燃料，供熔炉烧制使用。' },
+  { id: 'copper-ore', name: '铜矿', code: '铜矿', color: '#a66a3f', accent: '#d49760', description: '棕色圆形矿物，可与煤矿在熔炉中烧制。' },
+  { id: 'iron-ingot', name: '铁锭', code: '铁锭', color: '#cfd6d3', accent: '#f2f5f0', description: '铁矿烧制后的银色三角形产物。' },
+  { id: 'copper-ingot', name: '铜锭', code: '铜锭', color: '#b87445', accent: '#e0a36d', description: '铜矿烧制后的棕色三角形产物。' },
+  { id: 'iron-gear', name: '齿轮', code: '齿', color: '#b7c0bc', accent: '#eef2ec', description: '合成器使用铁锭制作的齿轮。' },
+  { id: 'copper-wire', name: '铜线', code: '铜线', color: '#d0894d', accent: '#f1c38d', description: '合成器将铜锭拉制成的铜线。' },
+  { id: 'circuit', name: '简易电路', code: '电路', color: '#4fa186', accent: '#d6e86a', description: '由铁锭与铜线合成的基础电路。' },
+  { id: 'half-circle', name: '半圆', code: '半圆', color: '#65c7f7', accent: '#dff6ff', description: '圆形经过切割后的产物。' },
+  { id: 'half-square', name: '半方', code: '半方', color: '#f5c64f', accent: '#fff3bf', description: '方形经过切割后的产物。' },
+  { id: 'circle-red', name: '红圆', code: '红圆', color: '#ee5d59', description: '圆形经过红色染色器后的产物。' },
+  { id: 'square-blue', name: '蓝方', code: '蓝方', color: '#568cff', description: '方形经过蓝色染色器后的产物。' },
+  { id: 'star-green', name: '绿星', code: '绿星', color: '#60d971', description: '星形经过绿色染色器后的产物。' },
+  { id: 'rotated-star', name: '旋转星', code: '旋星', color: '#b2f27d', description: '星形经过旋转器后的产物。' },
+  { id: 'circle-red+square', name: '红圆叠方', code: '红圆+方', color: '#ee5d59', accent: '#f5c64f', description: '堆叠器组合出的复合图形。' },
+  { id: 'diamond-blue+star', name: '蓝菱叠星', code: '蓝菱+星', color: '#568cff', accent: '#8ee86a', description: '高级堆叠目标。' },
+  { id: 'trash', name: '废料', code: '废', color: '#98a2b3', description: '被回收器清理的溢出图形。' }
 ]
 
 export const shapeById = Object.fromEntries(shapes.map((shape) => [shape.id, shape])) as Record<string, ShapeDefinition>

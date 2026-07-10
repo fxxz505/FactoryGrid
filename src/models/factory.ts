@@ -3,6 +3,14 @@ export type ShapeId =
   | 'square'
   | 'star'
   | 'diamond'
+  | 'iron-ore'
+  | 'coal-ore'
+  | 'copper-ore'
+  | 'iron-ingot'
+  | 'copper-ingot'
+  | 'iron-gear'
+  | 'copper-wire'
+  | 'circuit'
   | 'half-circle'
   | 'half-square'
   | 'circle-red'
@@ -20,6 +28,9 @@ export type BuildingType =
   | 'source-square'
   | 'source-star'
   | 'source-diamond'
+  | 'source-iron'
+  | 'source-coal'
+  | 'source-copper'
   | 'belt'
   | 'splitter'
   | 'merger'
@@ -31,6 +42,8 @@ export type BuildingType =
   | 'painter-blue'
   | 'painter-green'
   | 'stacker'
+  | 'furnace'
+  | 'assembler'
   | 'hub'
   | 'trash'
 
@@ -61,6 +74,21 @@ export interface BuildingDefinition {
   description: string
 }
 
+export interface RecipeIngredient {
+  shape: ShapeId
+  amount: number
+}
+
+export interface RecipeDefinition {
+  id: string
+  name: string
+  machine: 'furnace' | 'assembler'
+  inputs: RecipeIngredient[]
+  output: ShapeId
+  durationTicks: number
+  description: string
+}
+
 export interface ShapeItem {
   id: string
   shape: ShapeId
@@ -75,6 +103,7 @@ export interface FactoryEntity {
   position: GridPosition
   direction: Direction
   sourceShape?: ShapeId
+  recipeId?: string
   input: ShapeItem[]
   output: ShapeItem[]
   progress: number
