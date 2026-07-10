@@ -56,7 +56,7 @@ test('machines use simple geometric language without text labels or image assets
   await expect(canvas).toBeVisible()
   await expect(page.locator('.tool-row svg')).toHaveCount(5)
   await expect(page.locator('.machine-icon img')).toHaveCount(0)
-  await expect(page.locator('.machine-icon .icon-core')).toHaveCount(22)
+  await expect(page.locator('.machine-icon .icon-core')).toHaveCount(23)
   await expect(page.getByTestId('factory-canvas')).not.toContainText('\u67a2')
   expect(assetRequests).toEqual([])
 })
@@ -95,6 +95,7 @@ test('legacy saves omit removed container and inserter tools with clean delete l
 
   await expect(page.getByRole('button', { name: new RegExp('^\\u50a8\\u7269\\u7bb1') })).toHaveCount(0)
   await expect(page.getByRole('button', { name: new RegExp('^\\u673a\\u68b0\\u81c2') })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^研究中心/ })).toBeVisible()
   await expect(page.locator('.danger-tool').first()).toContainText('\u62c6\u9664\u5efa\u7b51')
   await expect(page.locator('.danger-tool').first()).toContainText('\u70b9\u51fb\u5355\u4e2a\u683c\u5b50\u5220\u9664\u5efa\u7b51')
   await expect(page.locator('.danger-tool').first()).not.toContainText('\u79fb\u52a8\u753b\u5e03')
@@ -252,7 +253,7 @@ test('conveyor animation uses one render clock and stable shape paths to avoid j
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
   const canvas = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/FactoryCanvas.vue', 'utf8'))
   const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
-  const drawShape = renderer.match(/function drawShape\([\s\S]*?function star/)
+  const drawShape = renderer.match(/function drawShape\([\s\S]*?function shouldUseShapeAccent/)
 
   expect(canvas).not.toContain('function animateBelts')
   expect(canvas).toContain('animationFrame = window.requestAnimationFrame(animateItems)')
@@ -260,26 +261,27 @@ test('conveyor animation uses one render clock and stable shape paths to avoid j
   expect(app).not.toContain('else scheduleSaveProject()')
   expect(renderer).toContain('return clamp01(renderAlpha)')
   expect(drawShape?.[0]).toContain('ctx.beginPath()')
-  expect(drawShape?.[0]).toContain('ctx.rect(')
+  expect(drawShape?.[0]).toContain('appendShapePath')
   expect(drawShape?.[0]).not.toContain('ctx.fillRect(x - radius')
   expect(drawShape?.[0]).not.toContain('ctx.strokeRect')
 })
 
-test('ore and factory products render as basic circles or triangles only', async () => {
+test('industrial products render with data-driven polygon tiers', async () => {
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
-  const drawShape = renderer.match(/function drawShape[\s\S]*?function isBasicCircleShape/)
+  const resources = await import('node:fs/promises').then((fs) => fs.readFile('src/data/resources.ts', 'utf8'))
 
-  expect(renderer).toContain('const basicCircleShapes')
-  expect(renderer).toContain('const basicTriangleShapes')
-  expect(renderer).toContain('function shouldUseShapeAccent')
-  expect(renderer).toContain('const useAccent = !!def?.accent && shouldUseShapeAccent(shape)')
-  expect(drawShape?.[0]).toContain('isBasicCircleShape(shape)')
-  expect(drawShape?.[0]).toContain('isBasicTriangleShape(shape)')
-  expect(drawShape?.[0]).not.toContain("shape === 'iron-gear'")
-  expect(drawShape?.[0]).not.toContain("shape === 'copper-wire'")
-  expect(drawShape?.[0]).not.toContain("shape === 'circuit'")
+  expect(renderer).toContain('const tier = shapeById[shape]?.tier')
+  expect(renderer).toContain('appendTierPath')
+  expect(renderer).toContain('appendRegularPolygon(ctx, tier + 2')
+  expect(resources).toContain("id: 'iron-ore'")
+  expect(resources).toContain('tier: 0')
+  expect(resources).toContain("id: 'iron-ingot'")
+  expect(resources).toContain('tier: 1')
+  expect(resources).toContain("id: 'iron-plate'")
+  expect(resources).toContain('tier: 2')
+  expect(resources).toContain("id: 'utility-pack'")
+  expect(resources).toContain('tier: 6')
 })
-
 test('canvas does not render the floating goal rail over the factory workspace', async () => {
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
 
@@ -299,22 +301,19 @@ test('pan tool labels and README stay clean Chinese for GitHub publishing', asyn
   expect(readme).not.toContain('\ufffd')
 })
 
-test('research panel tracks industrial delivery progress and locks advanced recipes', async ({ page }) => {
+test('research moves from the sidebar into a placeable lab', async ({ page }) => {
   await page.goto('/')
 
-  await expect(page.locator('.research-panel')).toBeVisible()
-  await expect(page.locator('.research-points')).toContainText('研究点')
-  await expect(page.locator('.research-node')).toHaveCount(4)
-
+  await expect(page.locator('.research-panel')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^研究中心/ })).toBeVisible()
   const canvas = page.getByTestId('factory-canvas')
   await page.getByRole('button', { name: /^合成器/ }).click()
   await canvas.click({ position: { x: 500, y: 240 } })
   await canvas.dblclick({ position: { x: 500, y: 240 } })
 
-  await expect(page.locator('.recipe-choice')).toContainText(['铁板', '铜线', '齿轮', '电路'])
+  await expect(page.locator('.recipe-choice')).toContainText(['铁板', '铜线', '齿轮', '电路', '物流研究包'])
   await expect(page.locator('.recipe-choice').filter({ hasText: '电机' })).toHaveCount(0)
 })
-
 test('completed metallurgy research reveals the motor recipe and upgrade planner', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('factorygrid-shapez-v4', JSON.stringify({
@@ -335,6 +334,8 @@ test('completed metallurgy research reveals the motor recipe and upgrade planner
       research: {
         points: 0,
         delivered: { 'iron-plate': 8, 'copper-wire': 8, 'iron-gear': 8, circuit: 8, steel: 8 },
+        progress: {},
+        consumed: {},
         completed: ['logistics-engineering', 'automation-upgrade', 'metallurgy-automation'],
         maxMachineLevel: 2
       },
@@ -411,4 +412,20 @@ test('standard belt interpolation respects its two tick movement interval', asyn
   const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
   expect(renderer).toContain('function beltMoveInterval')
   expect(renderer).toContain('/ beltMoveInterval(entity)')
+})
+
+test('research is configured through a double-clickable research lab instead of the sidebar', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.research-panel')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^研究中心/ })).toBeVisible()
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.getByRole('button', { name: /^研究中心/ }).click()
+  await canvas.click({ position: { x: 500, y: 240 } })
+  await canvas.dblclick({ position: { x: 500, y: 240 } })
+
+  await expect(page.locator('.research-project-panel')).toBeVisible()
+  await expect(page.locator('.research-project-choice')).toHaveCount(7)
+  await expect(page.locator('.research-project-choice')).toContainText(['物流工程', '自动化升级', '冶金自动化', '高级电子学', '机器人技术', '自动化核心', '规模化生产'])
 })

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { createShapezProject } from '../../src/data/examples'
-import { researchById } from '../../src/data/research'
 import {
   copyAreaToBlueprint,
   deleteArea,
@@ -62,7 +61,7 @@ describe('industrial expansion systems', () => {
     expect(result.entities.find((entity) => entity.type === 'assembler')?.input).toHaveLength(2)
   })
 
-  it('turns industrial hub deliveries into research points and unlocks research rewards', () => {
+  it('keeps hub delivery separate from research lab progress', () => {
     let project = createShapezProject()
     project.entities = []
     project.belts = {}
@@ -74,19 +73,11 @@ describe('industrial expansion systems', () => {
     project.belts[belt.id].enteredTick = -2
     const delivered = runTick(project).project
 
-    expect(delivered.research.points).toBe(1)
-    expect(delivered.research.delivered['iron-plate']).toBe(1)
     expect(delivered.metrics.delivered['iron-plate']).toBe(1)
-
-    delivered.research.points = researchById['logistics-engineering'].cost
-    delivered.research.delivered['iron-plate'] = 8
-    delivered.research.delivered['copper-wire'] = 8
-    const unlocked = runTick(delivered).project
-
-    expect(unlocked.research.completed).toContain('logistics-engineering')
-    expect(unlocked.unlocked).toContain('fast-belt')
+    expect(delivered.research.points).toBe(0)
+    expect(delivered.research.progress).toEqual({})
+    expect(delivered.research.completed).toEqual([])
   })
-
   it('copies, pastes and deletes rectangular factory areas as one operation', () => {
     let project = createShapezProject()
     project.entities = []
@@ -159,7 +150,7 @@ describe('industrial expansion systems', () => {
     const result = runTick(project).project
 
     expect(result.metrics.delivered['iron-plate']).toBe(1)
-    expect(result.research.points).toBe(1)
+    expect(result.research.points).toBe(0)
   })
   it('moves fast belts more often than standard belts without dropping blocked items', () => {
     let normal = createShapezProject()
@@ -187,5 +178,80 @@ describe('industrial expansion systems', () => {
     expect(normalAfter.belts[normalStart.id].item?.id).toBe('normal')
     expect(fastAfter.belts[fastStart.id].item).toBeUndefined()
     expect(Object.values(fastAfter.belts).some((runtime) => runtime.item?.id === 'fast')).toBe(true)
+  })
+  it('uses a distinct polygon tier for every industrial complexity level', async () => {
+    const { shapeById } = await import('../../src/data/resources')
+
+    expect(shapeById['iron-ore'].tier).toBe(0)
+    expect(shapeById['iron-ingot'].tier).toBe(1)
+    expect(shapeById['iron-plate'].tier).toBe(2)
+    expect(shapeById.circuit.tier).toBe(3)
+    expect(shapeById.motor.tier).toBe(4)
+    expect(shapeById['automation-core'].tier).toBe(5)
+    expect(shapeById['utility-pack'].tier).toBe(6)
+  })
+
+  it('accepts the selected science pack from a connected conveyor', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+    project = placeBuilding(project, 'belt', { x: 0, y: 0 }, 'east')
+    project = placeBuilding(project, 'research-lab', { x: 1, y: 0 }, 'east')
+    const belt = project.entities.find((entity) => entity.type === 'belt')!
+    const lab = project.entities.find((entity) => entity.type === 'research-lab')!
+    lab.recipeId = 'logistics-engineering'
+    project.belts[belt.id].item = { id: 'science-pack', shape: 'logistics-pack', age: 0 }
+    project.belts[belt.id].enteredTick = -2
+
+    const result = runTick(project).project
+
+    expect(result.belts[belt.id].item).toBeUndefined()
+    expect(result.entities.find((entity) => entity.type === 'research-lab')?.input[0]?.shape).toBe('logistics-pack')
+  })
+  it('research lab consumes selected science packs and unlocks the project reward', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+    project = placeBuilding(project, 'research-lab', { x: 0, y: 0 }, 'east')
+    const lab = project.entities.find((entity) => entity.type === 'research-lab')!
+    lab.recipeId = 'logistics-engineering'
+    for (let index = 0; index < 10; index += 1) {
+      lab.input.push({ id: `logistics-${index}`, shape: 'logistics-pack', age: 0 })
+    }
+
+    const result = runTicks(project, 260)
+
+    expect(result.research.completed).toContain('logistics-engineering')
+    expect(result.unlocked).toContain('fast-belt')
+    expect(result.research.progress['logistics-engineering']).toBe(10)
+    expect(result.entities.find((entity) => entity.type === 'research-lab')?.input).toHaveLength(0)
+  })
+
+  it('keeps prerequisite-locked research idle without consuming packs', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+    project = placeBuilding(project, 'research-lab', { x: 0, y: 0 }, 'east')
+    const lab = project.entities.find((entity) => entity.type === 'research-lab')!
+    lab.recipeId = 'robotics'
+    lab.input.push({ id: 'robotics-pack', shape: 'robotics-pack', age: 0 })
+
+    const result = runTicks(project, 100)
+    const resultLab = result.entities.find((entity) => entity.type === 'research-lab')!
+
+    expect(resultLab.input).toHaveLength(1)
+    expect(resultLab.progress).toBe(0)
+    expect(result.research.completed).not.toContain('robotics')
+  })
+
+  it('provides a closed advanced chain from bearings to utility science', async () => {
+    const { recipeById } = await import('../../src/data/recipes')
+
+    expect(recipeById.bearing.output).toBe('bearing')
+    expect(recipeById['steel-frame'].inputs.map((item) => item.shape)).toEqual(['steel', 'iron-plate'])
+    expect(recipeById.processor.output).toBe('processor')
+    expect(recipeById.servo.inputs.map((item) => item.shape)).toEqual(['motor', 'circuit', 'bearing'])
+    expect(recipeById['automation-core'].output).toBe('automation-core')
+    expect(recipeById['utility-pack'].inputs.map((item) => item.shape)).toEqual(['automation-core', 'servo', 'processor'])
   })
 })

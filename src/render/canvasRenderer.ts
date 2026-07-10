@@ -154,16 +154,14 @@ function drawShapeBatch(
 }
 
 function appendShapePath(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: number, radius: number): void {
-  if (isBasicCircleShape(shape) || shape.includes('circle')) {
-    ctx.moveTo(x + radius, y)
-    ctx.arc(x, y, radius, 0, Math.PI * 2)
+  const tier = shapeById[shape]?.tier
+  if (tier !== undefined) {
+    appendTierPath(ctx, tier, x, y, radius)
     return
   }
-  if (isBasicTriangleShape(shape)) {
-    ctx.moveTo(x, y - radius * 1.2)
-    ctx.lineTo(x + radius * 1.12, y + radius * 0.9)
-    ctx.lineTo(x - radius * 1.12, y + radius * 0.9)
-    ctx.closePath()
+  if (shape.includes('circle')) {
+    ctx.moveTo(x + radius, y)
+    ctx.arc(x, y, radius, 0, Math.PI * 2)
     return
   }
   if (shape.includes('square')) {
@@ -171,11 +169,7 @@ function appendShapePath(ctx: CanvasRenderingContext2D, shape: ShapeId, x: numbe
     return
   }
   if (shape.includes('diamond')) {
-    ctx.moveTo(x, y - radius * 1.25)
-    ctx.lineTo(x + radius * 1.25, y)
-    ctx.lineTo(x, y + radius * 1.25)
-    ctx.lineTo(x - radius * 1.25, y)
-    ctx.closePath()
+    appendRegularPolygon(ctx, 4, x, y, radius * 1.25, Math.PI / 4)
     return
   }
   if (shape.includes('star')) {
@@ -186,6 +180,32 @@ function appendShapePath(ctx: CanvasRenderingContext2D, shape: ShapeId, x: numbe
   ctx.arc(x, y, radius, 0, Math.PI * 2)
 }
 
+function appendTierPath(ctx: CanvasRenderingContext2D, tier: number, x: number, y: number, radius: number): void {
+  if (tier === 0) {
+    ctx.moveTo(x + radius, y)
+    ctx.arc(x, y, radius, 0, Math.PI * 2)
+    return
+  }
+  appendRegularPolygon(ctx, tier + 2, x, y, radius * 1.08, tier === 2 ? -Math.PI / 4 : -Math.PI / 2)
+}
+
+function appendRegularPolygon(
+  ctx: CanvasRenderingContext2D,
+  sides: number,
+  x: number,
+  y: number,
+  radius: number,
+  rotation = -Math.PI / 2
+): void {
+  for (let index = 0; index < sides; index += 1) {
+    const angle = rotation + index * Math.PI * 2 / sides
+    const px = x + Math.cos(angle) * radius
+    const py = y + Math.sin(angle) * radius
+    if (index === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
+  }
+  ctx.closePath()
+}
 function appendStarPath(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number): void {
   for (let index = 0; index < 10; index += 1) {
     const angle = -Math.PI / 2 + index * Math.PI / 5
@@ -332,7 +352,7 @@ function previewProject(preview: BeltPreview): FactoryProject {
     })),
     belts: {},
     metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
-    research: { points: 0, delivered: {}, completed: [], maxMachineLevel: 1 },
+    research: { points: 0, delivered: {}, progress: {}, consumed: {}, completed: [], maxMachineLevel: 1 },
     performance: { fps: 60, frameTime: 16.7, quality: 'high' },
     errors: [],
     events: [],
@@ -843,76 +863,23 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: 
   ctx.save()
   ctx.fillStyle = fill
   ctx.beginPath()
-
-  if (isBasicCircleShape(shape)) {
-    ctx.arc(x, y, radius, 0, Math.PI * 2)
-  } else if (isBasicTriangleShape(shape)) {
-    ctx.moveTo(x, y - radius * 1.2)
-    ctx.lineTo(x + radius * 1.12, y + radius * 0.9)
-    ctx.lineTo(x - radius * 1.12, y + radius * 0.9)
-    ctx.closePath()
-  } else if (shape.includes('square')) {
-    ctx.rect(x - radius, y - radius, radius * 2, radius * 2)
-  } else if (shape.includes('diamond')) {
-    ctx.moveTo(x, y - radius * 1.25)
-    ctx.lineTo(x + radius * 1.25, y)
-    ctx.lineTo(x, y + radius * 1.25)
-    ctx.lineTo(x - radius * 1.25, y)
-    ctx.closePath()
-  } else if (shape.includes('star')) {
-    star(ctx, x, y, radius)
-  } else if (shape.includes('half')) {
-    ctx.arc(x, y, radius, -Math.PI / 2, Math.PI / 2)
-    ctx.closePath()
-  } else {
-    ctx.arc(x, y, radius, 0, Math.PI * 2)
-  }
-
+  appendShapePath(ctx, shape, x, y, radius)
   ctx.fill()
   ctx.strokeStyle = 'rgba(38,52,59,0.28)'
   ctx.lineWidth = Math.max(1, radius * 0.09)
   ctx.stroke()
 
-  if (useAccent) {
-    const accent = def?.accent
-    if (accent) {
-      ctx.beginPath()
-      ctx.rect(x, y - radius, radius, radius * 2)
-      ctx.clip()
-      ctx.fillStyle = accent
-      ctx.fill()
-    }
+  if (useAccent && def?.accent) {
+    ctx.beginPath()
+    ctx.rect(x, y - radius, radius, radius * 2)
+    ctx.clip()
+    ctx.fillStyle = def.accent
+    ctx.fill()
   }
-
   ctx.restore()
 }
-
-const basicCircleShapes: ShapeId[] = ['iron-ore', 'coal-ore', 'copper-ore']
-const basicTriangleShapes: ShapeId[] = ['iron-ingot', 'copper-ingot', 'iron-plate', 'steel', 'iron-gear', 'copper-wire', 'circuit', 'motor']
-
-function isBasicCircleShape(shape: ShapeId): boolean {
-  return basicCircleShapes.includes(shape)
-}
-
-function isBasicTriangleShape(shape: ShapeId): boolean {
-  return basicTriangleShapes.includes(shape)
-}
-
 function shouldUseShapeAccent(shape: ShapeId): boolean {
-  return !isBasicCircleShape(shape) && !isBasicTriangleShape(shape)
-}
-
-function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
-  ctx.beginPath()
-  for (let i = 0; i < 10; i += 1) {
-    const angle = -Math.PI / 2 + (i * Math.PI) / 5
-    const radius = i % 2 === 0 ? r : r * 0.45
-    const px = x + Math.cos(angle) * radius
-    const py = y + Math.sin(angle) * radius
-    if (i === 0) ctx.moveTo(px, py)
-    else ctx.lineTo(px, py)
-  }
-  ctx.closePath()
+  return shapeById[shape]?.tier === undefined
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

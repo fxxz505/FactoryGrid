@@ -1,4 +1,4 @@
-﻿import { buildingById } from './machines'
+import { buildingById } from './machines'
 import type { BuildingType, Direction, FactoryEntity, FactoryProject, ShapeId } from '../models/factory'
 
 let entityCounter = 0
@@ -102,7 +102,7 @@ export function createShapezProject(): FactoryProject {
       'source-iron', 'source-coal', 'source-copper', 'belt',
       'splitter', 'merger', 'tunnel', 'launcher', 'cutter', 'rotator',
       'painter-red', 'painter-blue', 'painter-green', 'stacker',
-      'furnace', 'assembler', 'trash', 'hub'
+      'furnace', 'assembler', 'research-lab', 'trash', 'hub'
     ],
     entities,
     belts: {},
@@ -110,7 +110,7 @@ export function createShapezProject(): FactoryProject {
       delivered: {}, produced: {}, trashed: {}, beltItems: 0,
       activeBuildings: 0, bottlenecks: [], recentDelivery: []
     },
-    research: { points: 0, delivered: {}, completed: [], maxMachineLevel: 1 },
+    research: { points: 0, delivered: {}, progress: {}, consumed: {}, completed: [], maxMachineLevel: 1 },
     performance: { fps: 60, frameTime: 16.7, quality: 'high' },
     errors: [],
     events: [],

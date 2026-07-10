@@ -1,4 +1,4 @@
-﻿export type ShapeId =
+export type ShapeId =
   | 'circle'
   | 'square'
   | 'star'
@@ -14,6 +14,18 @@
   | 'copper-wire'
   | 'circuit'
   | 'motor'
+  | 'bearing'
+  | 'steel-frame'
+  | 'processor'
+  | 'servo'
+  | 'automation-core'
+  | 'logistics-pack'
+  | 'automation-pack'
+  | 'metallurgy-pack'
+  | 'electronics-pack'
+  | 'robotics-pack'
+  | 'core-pack'
+  | 'utility-pack'
   | 'half-circle'
   | 'half-square'
   | 'circle-red'
@@ -48,6 +60,7 @@ export type BuildingType =
   | 'stacker'
   | 'furnace'
   | 'assembler'
+  | 'research-lab'
   | 'hub'
   | 'trash'
 
@@ -74,6 +87,7 @@ export interface ShapeDefinition {
   color: string
   accent?: string
   description: string
+  tier?: number
 }
 
 export interface BuildingDefinition {
@@ -213,11 +227,14 @@ export interface ResearchDefinition {
   unlockBuildings?: BuildingType[]
   unlockRecipes?: string[]
   maxMachineLevel?: number
+  durationTicks: number
 }
 
 export interface ResearchState {
   points: number
   delivered: Partial<Record<ShapeId, number>>
+  progress: Record<string, number>
+  consumed: Record<string, Partial<Record<ShapeId, number>>>
   completed: string[]
   maxMachineLevel: number
 }

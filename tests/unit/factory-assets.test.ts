@@ -74,4 +74,14 @@ describe('factory geometric rendering contract', () => {
     ])
     expect(entityConnectionDirections(project, assembler)).toEqual(['north', 'east', 'south', 'west'])
   })
+  it('exposes the research lab as a four-way input-only machine', () => {
+    const lab: FactoryEntity = { id: 'lab-test', kind: 'processor', type: 'research-lab', label: 'lab', position: { x: 0, y: 0 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }
+
+    expect(machinePortRoles(lab)).toEqual([
+      { direction: 'north', role: 'input' },
+      { direction: 'east', role: 'input' },
+      { direction: 'south', role: 'input' },
+      { direction: 'west', role: 'input' }
+    ])
+  })
 })

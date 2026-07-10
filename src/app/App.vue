@@ -80,19 +80,6 @@
             <button type="button" :disabled="blueprint.entities.length === 0" @click="chooseBlueprint(blueprint)">选择并粘贴</button>
           </article>
         </section>
-
-        <section class="panel-block research-panel">
-          <div class="panel-heading"><h2>研究</h2><span class="research-points">研究点 {{ project.research.points }}</span></div>
-          <article v-for="research in researchDefinitions" :key="research.id" class="research-node" :class="{ completed: isResearchComplete(research.id), locked: !researchAvailable(research) }">
-            <div class="research-title"><strong>{{ research.name }}</strong><span>{{ isResearchComplete(research.id) ? '已完成' : research.cost + ' 点' }}</span></div>
-            <p>{{ research.description }}</p>
-            <div class="research-requirements">
-              <span v-for="requirement in research.requirements" :key="requirement.shape">
-                {{ shapeById[requirement.shape]?.name }} {{ project.research.delivered[requirement.shape] ?? 0 }}/{{ requirement.amount }}
-              </span>
-            </div>
-          </article>
-        </section>
       </aside>
 
       <section class="canvas-column">
@@ -106,6 +93,7 @@
           @delete-cell="handleDeleteCell"
           @viewport-change="handleViewportChange"
           @configure-assembler="openAssemblerRecipes"
+          @configure-research="openResearchProjects"
         />
         <SimulationBar :metrics="project.metrics" :errors="project.errors" :events="project.events" :performance="project.performance" />
       </section>
@@ -123,12 +111,37 @@
           @click="selectAssemblerRecipe(recipe.id)"
         >
           <span class="recipe-shapes">
-            <i v-for="ingredient in recipe.inputs" :key="ingredient.shape" :style="{ background: shapeById[ingredient.shape]?.color }"></i>
-            <b :style="{ background: shapeById[recipe.output]?.color }"></b>
+            <i v-for="ingredient in recipe.inputs" :key="ingredient.shape" class="tier-shape" :style="shapeStyle(ingredient.shape)"></i>
+            <b class="tier-shape" :style="shapeStyle(recipe.output)"></b>
           </span>
           <span><strong>{{ recipe.name }}</strong><small>{{ recipe.description }}</small></span>
         </button>
         <button class="wide-action" type="button" @click="closeRecipePanel">关闭</button>
+      </section>
+    </div>
+
+    <div v-if="researchPanelEntity" class="recipe-overlay" @click.self="closeResearchPanel">
+      <section class="recipe-panel research-project-panel" role="dialog" aria-modal="true" aria-label="研究项目">
+        <div class="panel-heading"><h2>研究项目</h2><span>{{ researchPanelEntity.label }}</span></div>
+        <button
+          v-for="research in researchDefinitions"
+          :key="research.id"
+          class="recipe-choice research-project-choice"
+          :class="{ active: researchPanelEntity.recipeId === research.id, completed: isResearchComplete(research.id), locked: !researchAvailable(research) }"
+          type="button"
+          :disabled="isResearchComplete(research.id) || !researchAvailable(research)"
+          @click="selectResearchProject(research.id)"
+        >
+          <span class="research-pack-list">
+            <i v-for="requirement in research.requirements" :key="requirement.shape" class="tier-shape" :style="shapeStyle(requirement.shape)"></i>
+          </span>
+          <span>
+            <strong>{{ research.name }}</strong>
+            <small>{{ research.description }}</small>
+            <small class="research-progress-text">{{ researchStatus(research) }}</small>
+          </span>
+        </button>
+        <button class="wide-action" type="button" @click="closeResearchPanel">关闭</button>
       </section>
     </div>
   </main>
@@ -164,6 +177,7 @@ const SAVE_THROTTLE_MS = 1200
 const SIMULATION_STEP_MS = 170
 const project = reactive(loadProject())
 const recipePanel = reactive<{ entityId?: string }>({})
+const researchPanel = reactive<{ entityId?: string }>({})
 const blueprintState = reactive<{ activeId?: string }>({})
 let frameHandle = 0
 let lastFrameTime = 0
@@ -182,6 +196,7 @@ const activeToolName = computed(() => {
   return names[project.activeTool] ?? buildingById[project.activeTool as BuildingType]?.name ?? project.activeTool
 })
 const recipePanelEntity = computed<FactoryEntity | undefined>(() => project.entities.find((entity) => entity.id === recipePanel.entityId && entity.type === 'assembler'))
+const researchPanelEntity = computed<FactoryEntity | undefined>(() => project.entities.find((entity) => entity.id === researchPanel.entityId && entity.type === 'research-lab'))
 const availableAssemblerRecipes = computed(() => unlockedAssemblerRecipes(project))
 const activeBlueprint = computed(() => project.blueprints.find((blueprint) => blueprint.id === blueprintState.activeId && blueprint.entities.length > 0))
 const canUpgrade = computed(() => project.research.completed.includes('automation-upgrade'))
@@ -207,7 +222,7 @@ function hydrateSavedProject(saved: FactoryProject): FactoryProject {
   }))
   const entityIds = new Set(entities.map((entity) => entity.id))
   const belts = Object.fromEntries(Object.entries(saved.belts ?? {}).filter(([id]) => entityIds.has(id)))
-  const unlocked = Array.from(new Set(saved.unlocked ?? base.unlocked)).filter((type) => availableSet.has(type))
+  const unlocked = Array.from(new Set([...(saved.unlocked ?? base.unlocked), 'research-lab' as BuildingType])).filter((type) => availableSet.has(type))
   const blueprints = (saved.blueprints ?? []).map((blueprint) => ({
     ...blueprint,
     entities: blueprint.entities ?? [],
@@ -222,7 +237,12 @@ function hydrateSavedProject(saved: FactoryProject): FactoryProject {
     entities,
     belts,
     blueprints,
-    research: { ...base.research, ...saved.research, delivered: saved.research?.delivered ?? {} },
+    research: {
+      ...base.research, ...saved.research,
+      delivered: saved.research?.delivered ?? {},
+      progress: saved.research?.progress ?? {},
+      consumed: saved.research?.consumed ?? {}
+    },
     performance: { ...base.performance, ...saved.performance },
     activeTool: isKnownTool(saved.activeTool) ? saved.activeTool : 'belt'
   }
@@ -342,6 +362,43 @@ function selectAssemblerRecipe(recipeId: string): void {
   closeRecipePanel()
 }
 
+function openResearchProjects(id: string): void {
+  project.selectedEntityId = id
+  researchPanel.entityId = id
+}
+function closeResearchPanel(): void { researchPanel.entityId = undefined }
+function selectResearchProject(researchId: string): void {
+  const entity = project.entities.find((candidate) => candidate.id === researchPanel.entityId && candidate.type === 'research-lab')
+  const research = researchDefinitions.find((candidate) => candidate.id === researchId)
+  if (!entity || !research || isResearchComplete(research.id) || !researchAvailable(research)) return
+  entity.recipeId = research.id
+  entity.progress = 0
+  saveProject()
+}
+function researchStatus(research: ResearchDefinition): string {
+  if (isResearchComplete(research.id)) return '已完成'
+  if (!researchAvailable(research)) {
+    return '需要前置研究：' + research.prerequisites.map((id) => researchDefinitions.find((item) => item.id === id)?.name ?? id).join('、')
+  }
+  return research.requirements.map((requirement) => {
+    const consumed = project.research.consumed[research.id]?.[requirement.shape] ?? 0
+    return `${shapeById[requirement.shape]?.name} ${consumed}/${requirement.amount}`
+  }).join(' · ')
+}
+function shapeStyle(shape: keyof typeof shapeById): Record<string, string> {
+  const definition = shapeById[shape]
+  return { background: definition?.color ?? '#647278', clipPath: polygonClip(definition?.tier ?? 0) }
+}
+function polygonClip(tier: number): string {
+  const sides = tier === 0 ? 0 : tier + 2
+  if (sides < 3) return 'circle(50%)'
+  const points = Array.from({ length: sides }, (_, index) => {
+    const rotation = tier === 2 ? -Math.PI / 4 : -Math.PI / 2
+    const angle = rotation + index * Math.PI * 2 / sides
+    return `${50 + Math.cos(angle) * 48}% ${50 + Math.sin(angle) * 48}%`
+  })
+  return `polygon(${points.join(',')})`
+}
 function isResearchComplete(id: string): boolean { return project.research.completed.includes(id) }
 function researchAvailable(research: ResearchDefinition): boolean {
   return research.prerequisites.every((id) => isResearchComplete(id))

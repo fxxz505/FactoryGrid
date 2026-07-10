@@ -1,4 +1,4 @@
-﻿import type { BuildingDefinition } from '../models/factory'
+import type { BuildingDefinition } from '../models/factory'
 
 export const buildings: BuildingDefinition[] = [
   { id: 'source-circle', name: '圆形矿脉', kind: 'source', hotkey: '1', durationTicks: 12, description: '稳定产出原始圆形。' },
@@ -22,8 +22,9 @@ export const buildings: BuildingDefinition[] = [
   { id: 'stacker', name: '堆叠器', kind: 'processor', hotkey: 'K', durationTicks: 24, description: '把兼容图形组合成复合目标。' },
   { id: 'furnace', name: '熔炉', kind: 'processor', hotkey: 'V', durationTicks: 34, description: '从任一输入端接收兼容原料，烧制铁锭、铜锭或钢材。' },
   { id: 'assembler', name: '合成器', kind: 'processor', hotkey: 'A', durationTicks: 28, description: '双击后选择配方，将输入物料合成新产物。' },
+  { id: 'research-lab', name: '研究中心', kind: 'processor', hotkey: 'Y', durationTicks: 18, description: '接收研究包，双击选择研究项目并逐包推进。' },
   { id: 'trash', name: '回收器', kind: 'processor', hotkey: 'X', durationTicks: 1, description: '删除输入物品，用于清理堵塞。' },
-  { id: 'hub', name: '枢纽', kind: 'hub', hotkey: 'H', durationTicks: 1, description: '接收目标物品、研究产品并推进解锁。' }
+  { id: 'hub', name: '枢纽', kind: 'hub', hotkey: 'H', durationTicks: 1, description: '接收最终产品并统计交付，不再直接推进研究。' }
 ]
 
 export const buildingById = Object.fromEntries(buildings.map((building) => [building.id, building])) as Record<string, BuildingDefinition>

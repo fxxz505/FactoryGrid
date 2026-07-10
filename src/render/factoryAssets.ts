@@ -47,6 +47,7 @@ export const machineGeometry: Record<BuildingType, MachineGeometryStyle> = {
   stacker: { body: '#efede4', rim: '#5e5b4f', accent: '#bba958', core: 'stack', scale: 0.96 },
   furnace: { body: '#eee8df', rim: '#6a5544', accent: '#d07048', core: 'ring', scale: 0.98 },
   assembler: { body: '#e7eee9', rim: '#465e55', accent: '#5fa487', core: 'stack', scale: 0.98 },
+  'research-lab': { body: '#e9e5f0', rim: '#5e536c', accent: '#8d72aa', core: 'ring', scale: 0.98 },
   hub: { body: '#dbeee9', rim: '#2e5954', accent: '#1e8d80', core: 'square', scale: 1 },
   trash: { body: '#eee4df', rim: '#765149', accent: '#b55a4f', core: 'bars', scale: 0.96 }
 }
@@ -157,6 +158,9 @@ function machinePorts(entity: FactoryEntity): MachinePort[] {
       { direction: opposite(entity.direction), role: 'input' },
       { direction: rotateCounterClockwise(entity.direction), role: 'input' }
     ]
+  }
+  if (entity.type === 'research-lab') {
+    return directions().map((direction) => ({ direction, role: 'input' }))
   }
   if (entity.type === 'assembler') {
     return [

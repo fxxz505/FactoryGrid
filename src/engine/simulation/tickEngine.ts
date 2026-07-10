@@ -1,6 +1,6 @@
 import { buildingById } from '../../data/machines'
 import { assemblerRecipes, furnaceRecipes, recipeById, recipeIsUnlocked } from '../../data/recipes'
-import { researchDefinitions, researchPointValues } from '../../data/research'
+import { researchById } from '../../data/research'
 import { nextPosition, cloneProject } from '../../data/examples'
 import { machinePortRoles } from '../../render/factoryAssets'
 import type {
@@ -48,7 +48,6 @@ export function runTick(project: FactoryProject): TickResult {
   updateProcessors(next, accumulator, index)
   updateBelts(next, index)
   transferOutputs(next, accumulator, index)
-  updateResearch(next, accumulator)
   const errors = detectErrors(next)
   next.errors = errors
   next.metrics = updateMetrics(next, accumulator, errors)
@@ -85,6 +84,8 @@ function cloneSimulationProject(project: FactoryProject): FactoryProject {
     research: {
       ...project.research,
       delivered: { ...project.research.delivered },
+      progress: { ...project.research.progress },
+      consumed: Object.fromEntries(Object.entries(project.research.consumed).map(([id, values]) => [id, { ...values }])),
       completed: [...project.research.completed]
     },
     errors: [...project.errors],
@@ -119,6 +120,10 @@ function updateProcessors(project: FactoryProject, accumulator: TickAccumulator,
   project.entities.filter((entity) => entity.kind === 'processor').forEach((entity) => {
     if (entity.type === 'trash') {
       updateTrash(entity, accumulator)
+      return
+    }
+    if (entity.type === 'research-lab') {
+      updateResearchLab(entity, project, accumulator)
       return
     }
     if (ROUTER_TYPES.includes(entity.type)) {
@@ -317,11 +322,7 @@ function acceptItem(
     else increment(project.metrics.delivered, item.shape, 1)
     const goal = project.goals.find((candidate) => candidate.shape === item.shape)
     if (goal) goal.delivered += 1
-    const researchPoints = researchPointValues[item.shape] ?? 0
-    if (researchPoints > 0) {
-      project.research.points += researchPoints
-      project.research.delivered[item.shape] = (project.research.delivered[item.shape] ?? 0) + 1
-    }
+
     entity.status = 'delivering'
     accumulator?.events.unshift({ tick: project.tick, entityId: entity.id, message: `\u67a2\u7ebd\u63a5\u6536 ${item.shape}` })
     return
@@ -415,6 +416,12 @@ function acceptsShape(project: FactoryProject, entity: FactoryEntity, shape: Sha
     const recipe = recipeById[entity.recipeId ?? 'iron-plate'] ?? assemblerRecipes[0]
     return recipeIsUnlocked(project, recipe) && recipe.inputs.some((ingredient) => ingredient.shape === shape)
   }
+  if (entity.type === 'research-lab') {
+    const research = entity.recipeId ? researchById[entity.recipeId] : undefined
+    return !!research && !project.research.completed.includes(research.id)
+      && research.prerequisites.every((id) => project.research.completed.includes(id))
+      && research.requirements.some((requirement) => requirement.shape === shape)
+  }
   return true
 }
 
@@ -425,6 +432,7 @@ function inputCapacity(entity: FactoryEntity): number {
     const recipe = recipeById[entity.recipeId ?? 'iron-plate'] ?? assemblerRecipes[0]
     return recipe.inputs.reduce((sum, ingredient) => sum + ingredient.amount, 0) + 2
   }
+  if (entity.type === 'research-lab') return 48
   return 1
 }
 
@@ -438,33 +446,55 @@ function beltMoveInterval(entity: FactoryEntity): number {
   return entity.type === 'fast-belt' ? 1 : 2
 }
 
-function updateResearch(project: FactoryProject, accumulator: TickAccumulator): void {
-  let completedResearch = true
-  while (completedResearch) {
-    completedResearch = false
-    for (const research of researchDefinitions) {
-      if (project.research.completed.includes(research.id)) continue
-      if (!research.prerequisites.every((id) => project.research.completed.includes(id))) continue
-      if (project.research.points < research.cost) continue
-      if (!research.requirements.every((requirement) => (project.research.delivered[requirement.shape] ?? 0) >= requirement.amount)) continue
-
-      project.research.points -= research.cost
-      project.research.completed.push(research.id)
-      research.unlockBuildings?.forEach((building) => {
-        if (!project.unlocked.includes(building)) project.unlocked.push(building)
-      })
-      if (research.maxMachineLevel) {
-        project.research.maxMachineLevel = Math.max(project.research.maxMachineLevel, research.maxMachineLevel)
-      }
-      accumulator.events.unshift({
-        tick: project.tick,
-        entityId: 'research',
-        message: '研究完成：' + research.name
-      })
-      completedResearch = true
-      break
-    }
+function updateResearchLab(entity: FactoryEntity, project: FactoryProject, accumulator: TickAccumulator): void {
+  const research = entity.recipeId ? researchById[entity.recipeId] : undefined
+  if (!research || project.research.completed.includes(research.id)
+    || !research.prerequisites.every((id) => project.research.completed.includes(id))) {
+    entity.progress = 0
+    entity.status = 'waiting'
+    return
   }
+
+  const consumed = project.research.consumed[research.id] ??= {}
+  const requirement = research.requirements.find((item) => (consumed[item.shape] ?? 0) < item.amount)
+  if (!requirement) {
+    completeResearch(project, research.id, accumulator, entity.id)
+    return
+  }
+
+  const inputIndex = entity.input.findIndex((item) => item.shape === requirement.shape)
+  if (inputIndex < 0) {
+    entity.status = 'waiting'
+    return
+  }
+
+  entity.progress += 1
+  entity.status = 'running'
+  if (entity.progress < research.durationTicks) return
+
+  entity.progress = 0
+  entity.input.splice(inputIndex, 1)
+  consumed[requirement.shape] = (consumed[requirement.shape] ?? 0) + 1
+  project.research.progress[research.id] = (project.research.progress[research.id] ?? 0) + 1
+  project.research.points += 1
+  project.research.delivered[requirement.shape] = (project.research.delivered[requirement.shape] ?? 0) + 1
+
+  if (research.requirements.every((item) => (consumed[item.shape] ?? 0) >= item.amount)) {
+    completeResearch(project, research.id, accumulator, entity.id)
+  }
+}
+
+function completeResearch(project: FactoryProject, researchId: string, accumulator: TickAccumulator, entityId: string): void {
+  const research = researchById[researchId]
+  if (!research || project.research.completed.includes(research.id)) return
+  project.research.completed.push(research.id)
+  research.unlockBuildings?.forEach((building) => {
+    if (!project.unlocked.includes(building)) project.unlocked.push(building)
+  })
+  if (research.maxMachineLevel) {
+    project.research.maxMachineLevel = Math.max(project.research.maxMachineLevel, research.maxMachineLevel)
+  }
+  accumulator.events.unshift({ tick: project.tick, entityId, message: '研究完成：' + research.name })
 }
 function detectErrors(project: FactoryProject): FactoryError[] {
   const errors: FactoryError[] = []

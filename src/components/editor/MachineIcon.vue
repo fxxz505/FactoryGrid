@@ -18,6 +18,7 @@ const toneClass = computed(() => {
   if (['fast-belt', 'splitter', 'merger', 'tunnel', 'launcher'].includes(props.type)) return 'tone-logistic'
   if (props.type === 'trash') return 'tone-danger'
   if (props.type === 'hub') return 'tone-hub'
+  if (props.type === 'research-lab') return 'tone-research'
   return 'tone-machine'
 })
 </script>

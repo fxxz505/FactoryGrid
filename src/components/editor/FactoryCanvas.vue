@@ -51,6 +51,7 @@ const emit = defineEmits<{
   deleteCell: [cell: GridPosition]
   viewportChange: [viewport: ViewportState]
   configureAssembler: [id: string]
+  configureResearch: [id: string]
 }>()
 
 const staticCanvasRef = ref<HTMLCanvasElement>()
@@ -145,6 +146,7 @@ function cellFromEvent(event: MouseEvent): GridPosition {
 function onDoubleClick(event: MouseEvent): void {
   const clicked = entityAtPoint(props.project, point(event))
   if (clicked?.type === 'assembler') emit('configureAssembler', clicked.id)
+  if (clicked?.type === 'research-lab') emit('configureResearch', clicked.id)
 }
 
 function onClick(event: MouseEvent): void {
