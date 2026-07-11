@@ -75,6 +75,16 @@
 
         <section class="panel-block">
           <div class="panel-heading"><h2>蓝图</h2><span>{{ project.blueprints.length }}</span></div>
+          <div class="blueprint-options" aria-label="蓝图粘贴参数">
+            <button type="button" title="旋转蓝图" @click="rotateBlueprintOption"><RotateCw :size="16" />{{ blueprintOptions.rotation }}°</button>
+            <button type="button" :class="{ active: blueprintOptions.mirrorX }" title="水平镜像" @click="blueprintOptions.mirrorX = !blueprintOptions.mirrorX">镜像</button>
+            <select v-model="blueprintOptions.beltTier" aria-label="替换传送带等级">
+              <option value="keep">保留物流等级</option>
+              <option value="belt">普通传送带</option>
+              <option value="fast-belt" :disabled="!project.unlocked.includes('fast-belt')">高速传送带</option>
+              <option value="express-belt" :disabled="!project.unlocked.includes('express-belt')">极速传送带</option>
+            </select>
+          </div>
           <article v-for="blueprint in project.blueprints" :key="blueprint.id" class="blueprint-card" :class="{ active: activeBlueprint?.id === blueprint.id }">
             <strong>{{ blueprint.name }}</strong>
             <p>{{ blueprint.description }}</p>
@@ -87,6 +97,8 @@
         <FactoryCanvas
           :project="project"
           :selected-entity-id="project.selectedEntityId"
+          :topology-revision="topologyRevision"
+          :topology-mutation="topologyMutation"
           @select="project.selectedEntityId = $event"
           @place="handlePlace"
           @drag-belt="handleDragBelt"
@@ -150,8 +162,11 @@
       v-if="worldMapOpen"
       :project="project"
       :viewport-size="factoryViewportSize"
+      :bookmarks="project.mapBookmarks"
       @close="closeWorldMap"
       @viewport-change="handleViewportChange"
+      @add-bookmark="addMapBookmark"
+      @remove-bookmark="removeMapBookmark"
     />
   </main>
 </template>
@@ -172,16 +187,18 @@ import { unlockedAssemblerRecipes } from '../data/recipes'
 import { researchDefinitions } from '../data/research'
 import { createShapezProject } from '../data/examples'
 import { runTick } from '../engine/simulation/tickEngine'
+import { SimulationWorkerClient } from '../engine/simulation/simulationWorkerClient'
+import { loadStoredProject, projectStorageChunkKey, saveStoredProject } from '../utils/projectStorage'
 import {
-  buildBeltLine, copyAreaToBlueprint, deleteArea, deleteAt, pasteBlueprint,
-  placeBuilding, rotateDirection, rotateSelectedEntity, undo, upgradeArea
+  buildBeltLine, copyAreaToBlueprint, deleteArea, deleteAt,
+  editorTopologyMutation, pasteBlueprintWithOptions, placeBuilding, rotateDirection, rotateSelectedEntity, undo, upgradeArea,
+  type EditorTopologyMutation
 } from '../engine/simulation/editorActions'
 import type {
-  Blueprint, BuildingType, Direction, FactoryEntity, FactoryProject,
+  Blueprint, BlueprintPasteOptions, BuildingType, Direction, FactoryEntity, FactoryProject,
   GridPosition, ResearchDefinition, ToolId, ViewportState
 } from '../models/factory'
 
-const STORAGE_KEY = 'factorygrid-shapez-v4'
 const MAX_SIMULATION_STEPS_PER_FRAME = 4
 const SAVE_THROTTLE_MS = 1200
 const SIMULATION_STEP_MS = 170
@@ -189,12 +206,20 @@ const project = reactive(loadProject())
 const recipePanel = reactive<{ entityId?: string }>({})
 const researchPanel = reactive<{ entityId?: string }>({})
 const worldMapOpen = ref(false)
+const topologyRevision = ref(0)
+const topologyMutation = ref<EditorTopologyMutation>()
 const factoryViewportSize = reactive({ width: 960, height: 640 })
 const blueprintState = reactive<{ activeId?: string }>({})
+const blueprintOptions = reactive<BlueprintPasteOptions>({ rotation: 0, mirrorX: false, beltTier: 'keep' })
+const simulationWorker = new SimulationWorkerClient()
+let simulationRevision = 0
 let frameHandle = 0
 let lastFrameTime = 0
 let simAccumulator = 0
 let saveTimer: number | undefined
+let saveIdleHandle: number | undefined
+let saveAllChunks = false
+const dirtyStorageChunks = new Set<string>()
 let lastSavedAt = 0
 let fpsWindowStart = 0
 let fpsFrames = 0
@@ -214,13 +239,8 @@ const activeBlueprint = computed(() => project.blueprints.find((blueprint) => bl
 const canUpgrade = computed(() => project.research.completed.includes('automation-upgrade'))
 
 function loadProject(): FactoryProject {
-  const saved = localStorage.getItem(STORAGE_KEY)
-  if (!saved) return createShapezProject()
-  try {
-    return hydrateSavedProject(JSON.parse(saved) as FactoryProject)
-  } catch {
-    return createShapezProject()
-  }
+  const saved = loadStoredProject()
+  return saved ? hydrateSavedProject(saved) : createShapezProject()
 }
 
 function hydrateSavedProject(saved: FactoryProject): FactoryProject {
@@ -233,7 +253,9 @@ function hydrateSavedProject(saved: FactoryProject): FactoryProject {
     output: entity.output ?? []
   }))
   const entityIds = new Set(entities.map((entity) => entity.id))
-  const belts = Object.fromEntries(Object.entries(saved.belts ?? {}).filter(([id]) => entityIds.has(id)))
+  const belts = Object.fromEntries(Object.entries(saved.belts ?? {}).filter(([id, runtime]) => (
+    entityIds.has(id) && runtime.item !== undefined
+  )))
   const unlocked = Array.from(new Set([...(saved.unlocked ?? base.unlocked), 'research-lab' as BuildingType])).filter((type) => availableSet.has(type))
   const blueprints = (saved.blueprints ?? []).map((blueprint) => ({
     ...blueprint,
@@ -256,6 +278,7 @@ function hydrateSavedProject(saved: FactoryProject): FactoryProject {
       consumed: saved.research?.consumed ?? {}
     },
     performance: { ...base.performance, ...saved.performance },
+    mapBookmarks: saved.mapBookmarks ?? base.mapBookmarks,
     activeTool: isKnownTool(saved.activeTool) ? saved.activeTool : 'belt'
   }
 }
@@ -265,22 +288,62 @@ function isKnownTool(tool: ToolId): boolean {
     || buildings.some((building) => building.id === tool)
 }
 
-function replaceProject(next: FactoryProject, persist = true): void {
+function replaceProject(next: FactoryProject, persist = true, forceTopologyRefresh = false): void {
+  const mutation = editorTopologyMutation(next)
+  simulationRevision += 1
   Object.assign(project, next)
-  if (persist) saveProject()
+  if (mutation || forceTopologyRefresh) {
+    topologyMutation.value = mutation
+    topologyRevision.value += 1
+  }
+  if (forceTopologyRefresh) saveAllChunks = true
+  else if (mutation) markDirtyStorageChunks(mutation)
+  if (persist) scheduleSaveProject(250)
 }
 
 function saveProject(): void {
   if (saveTimer) window.clearTimeout(saveTimer)
   saveTimer = undefined
+  if (saveIdleHandle !== undefined) cancelIdleSave(saveIdleHandle)
+  saveIdleHandle = undefined
   lastSavedAt = Date.now()
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(project))
+  saveStoredProject(toRaw(project), saveAllChunks ? undefined : dirtyStorageChunks)
+  dirtyStorageChunks.clear()
+  saveAllChunks = false
+}
+
+function markDirtyStorageChunks(mutation: EditorTopologyMutation): void {
+  mutation.removed.forEach((entity) => dirtyStorageChunks.add(projectStorageChunkKey(entity)))
+  mutation.added.forEach((entity) => dirtyStorageChunks.add(projectStorageChunkKey(entity)))
 }
 
 function scheduleSaveProject(minimumDelay = 0): void {
   const elapsed = Date.now() - lastSavedAt
   const delay = Math.max(minimumDelay, elapsed >= SAVE_THROTTLE_MS ? 0 : SAVE_THROTTLE_MS - elapsed)
-  if (!saveTimer) saveTimer = window.setTimeout(saveProject, delay)
+  if (!saveTimer && saveIdleHandle === undefined) {
+    saveTimer = window.setTimeout(() => {
+      saveTimer = undefined
+      saveIdleHandle = requestIdleSave(() => {
+        saveIdleHandle = undefined
+        saveProject()
+      })
+    }, delay)
+  }
+}
+
+function requestIdleSave(callback: () => void): number {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+  }
+  return idleWindow.requestIdleCallback
+    ? idleWindow.requestIdleCallback(callback, { timeout: 3000 })
+    : window.setTimeout(callback, 32)
+}
+
+function cancelIdleSave(handle: number): void {
+  const idleWindow = window as Window & { cancelIdleCallback?: (handle: number) => void }
+  if (idleWindow.cancelIdleCallback) idleWindow.cancelIdleCallback(handle)
+  else window.clearTimeout(handle)
 }
 
 function selectTool(tool: ToolId): void {
@@ -297,7 +360,7 @@ function toggleRun(): void {
 function step(): void { replaceProject(runTick(project).project) }
 function resetProject(): void {
   blueprintState.activeId = undefined
-  replaceProject(createShapezProject())
+  replaceProject(createShapezProject(), true, true)
 }
 function centerViewport(): void {
   project.viewport = { x: 150, y: 88, zoom: 1 }
@@ -314,50 +377,64 @@ function openWorldMap(): void {
   worldMapOpen.value = true
 }
 function closeWorldMap(): void { worldMapOpen.value = false }
+function addMapBookmark(position: GridPosition): void {
+  project.mapBookmarks.push({
+    id: 'bookmark-' + Date.now().toString(36),
+    name: '区域 ' + (project.mapBookmarks.length + 1),
+    position
+  })
+  saveProject()
+}
+function removeMapBookmark(id: string): void {
+  project.mapBookmarks = project.mapBookmarks.filter((bookmark) => bookmark.id !== id)
+  saveProject()
+}
 function rotateTool(): void {
   if (buildings.some((building) => building.id === project.activeTool)) {
     project.activeDirection = rotateDirection(project.activeDirection)
     saveProject()
   } else if (project.activeTool === 'select' && project.selectedEntityId) {
-    replaceProject(rotateSelectedEntity(project))
+    replaceProject(rotateSelectedEntity(toRaw(project)))
   }
 }
-function undoProject(): void { replaceProject(undo(project)) }
+function undoProject(): void { replaceProject(undo(toRaw(project))) }
 
 function handlePlace(cell: GridPosition): void {
   if (project.activeTool === 'select' || project.activeTool === 'pan') return
   if (project.activeTool === 'paste-blueprint' && activeBlueprint.value) {
-    replaceProject(pasteBlueprint(project, activeBlueprint.value, cell))
+    replaceProject(pasteBlueprintWithOptions(toRaw(project), activeBlueprint.value, cell, blueprintOptions))
     return
   }
   if (project.activeTool === 'delete') {
-    replaceProject(deleteAt(project, cell))
+    replaceProject(deleteAt(toRaw(project), cell))
     return
   }
   if (['copy-area', 'delete-area', 'upgrade-area'].includes(project.activeTool)) return
-  replaceProject(placeBuilding(project, project.activeTool as BuildingType, cell, project.activeDirection))
+  replaceProject(placeBuilding(toRaw(project), project.activeTool as BuildingType, cell, project.activeDirection))
 }
 
 function handleDragBelt(start: GridPosition, end: GridPosition, direction: Direction): void {
-  const type = project.activeTool === 'tunnel' ? 'tunnel' : project.activeTool === 'fast-belt' ? 'fast-belt' : 'belt'
-  replaceProject(buildBeltLine(project, start, end, direction, type))
+  const type = project.activeTool === 'tunnel'
+    ? 'tunnel'
+    : project.activeTool === 'fast-belt' ? 'fast-belt' : project.activeTool === 'express-belt' ? 'express-belt' : 'belt'
+  replaceProject(buildBeltLine(toRaw(project), start, end, direction, type))
 }
 
 function handleAreaAction(start: GridPosition, end: GridPosition): void {
   if (project.activeTool === 'copy-area') {
-    const blueprint = copyAreaToBlueprint(project, start, end, '区域蓝图 ' + (project.blueprints.length + 1))
+    const blueprint = copyAreaToBlueprint(toRaw(project), start, end, '区域蓝图 ' + (project.blueprints.length + 1))
     project.blueprints.unshift(blueprint)
     blueprintState.activeId = blueprint.id
     project.activeTool = 'paste-blueprint'
     saveProject()
   } else if (project.activeTool === 'delete-area') {
-    replaceProject(deleteArea(project, start, end))
+    replaceProject(deleteArea(toRaw(project), start, end))
   } else if (project.activeTool === 'upgrade-area') {
-    replaceProject(upgradeArea(project, start, end))
+    replaceProject(upgradeArea(toRaw(project), start, end))
   }
 }
 
-function handleDeleteCell(cell: GridPosition): void { replaceProject(deleteAt(project, cell)) }
+function handleDeleteCell(cell: GridPosition): void { replaceProject(deleteAt(toRaw(project), cell)) }
 function handleViewportChange(viewport: ViewportState): void {
   project.viewport = viewport
   scheduleSaveProject(250)
@@ -367,6 +444,9 @@ function chooseBlueprint(blueprint: Blueprint): void {
   blueprintState.activeId = blueprint.id
   project.activeTool = 'paste-blueprint'
   scheduleSaveProject()
+}
+function rotateBlueprintOption(): void {
+  blueprintOptions.rotation = ((blueprintOptions.rotation + 90) % 360) as BlueprintPasteOptions['rotation']
 }
 
 function openAssemblerRecipes(id: string): void {
@@ -379,6 +459,7 @@ function selectAssemblerRecipe(recipeId: string): void {
   if (!entity || !availableAssemblerRecipes.value.some((recipe) => recipe.id === recipeId)) return
   entity.recipeId = recipeId
   entity.progress = 0
+  simulationRevision += 1
   saveProject()
   closeRecipePanel()
 }
@@ -394,6 +475,7 @@ function selectResearchProject(researchId: string): void {
   if (!entity || !research || isResearchComplete(research.id) || !researchAvailable(research)) return
   entity.recipeId = research.id
   entity.progress = 0
+  simulationRevision += 1
   saveProject()
 }
 function researchStatus(research: ResearchDefinition): string {
@@ -456,7 +538,9 @@ function updatePerformance(time: number, delta: number): void {
   const sampledFps = Math.round((fpsFrames * 1000) / elapsed)
   project.performance.fps = Math.round(project.performance.fps * 0.45 + sampledFps * 0.55)
   project.performance.frameTime = Math.round(delta * 10) / 10
-  project.performance.quality = project.performance.fps < 50 ? 'performance' : 'high'
+  project.performance.quality = project.performance.fps < 44
+    ? 'performance'
+    : project.performance.fps < 56 ? 'balanced' : 'high'
   fpsWindowStart = time
   fpsFrames = 0
 }
@@ -470,11 +554,29 @@ function animationLoop(time: number): void {
   if (project.running) {
     simAccumulator += delta
     const stepMs = SIMULATION_STEP_MS / Math.max(1, project.speed)
+    if (simulationWorker.shouldUseWorker(toRaw(project))) {
+      if (simAccumulator >= stepMs && !simulationWorker.isBusy()) {
+        const steps = Math.min(MAX_SIMULATION_STEPS_PER_FRAME, Math.floor(simAccumulator / stepMs))
+        const revision = simulationRevision
+        if (simulationWorker.step(toRaw(project), steps, revision, (next) => {
+          if (simulationRevision !== revision) return
+          applySimulationResult(next)
+          project.performance.simulationMode = 'worker'
+        })) simAccumulator -= steps * stepMs
+      }
+      frameHandle = window.requestAnimationFrame(animationLoop)
+      return
+    }
     let steps = 0
     while (simAccumulator >= stepMs && steps < MAX_SIMULATION_STEPS_PER_FRAME) {
-      replaceProject(runTick(toRaw(project)).project, false)
-      simAccumulator -= stepMs
       steps += 1
+      simAccumulator -= stepMs
+    }
+    if (steps > 0) {
+      let next = toRaw(project)
+      for (let index = 0; index < steps; index += 1) next = runTick(next).project
+      Object.assign(project, next)
+      project.performance.simulationMode = 'main'
     }
     if (steps === MAX_SIMULATION_STEPS_PER_FRAME && simAccumulator >= stepMs) simAccumulator = 0
   } else {
@@ -482,6 +584,18 @@ function animationLoop(time: number): void {
   }
 
   frameHandle = window.requestAnimationFrame(animationLoop)
+}
+
+function applySimulationResult(next: FactoryProject): void {
+  project.tick = next.tick
+  project.entities = next.entities
+  project.belts = next.belts
+  project.metrics = next.metrics
+  project.research = next.research
+  project.errors = next.errors
+  project.events = next.events
+  project.goals = next.goals
+  project.unlocked = next.unlocked
 }
 
 onMounted(() => {
@@ -494,6 +608,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('beforeunload', saveProject)
   if (frameHandle) window.cancelAnimationFrame(frameHandle)
+  simulationWorker.dispose()
   saveProject()
 })
 </script>

@@ -93,8 +93,9 @@ function cloneSimulationProject(project: FactoryProject): FactoryProject {
   }
 }
 function ensureBelts(project: FactoryProject): void {
-  project.entities.filter((entity) => entity.kind === 'belt').forEach((entity) => {
-    project.belts[entity.id] ??= {}
+  const entityIds = new Set(project.entities.map((entity) => entity.id))
+  Object.keys(project.belts).forEach((id) => {
+    if (!entityIds.has(id)) delete project.belts[id]
   })
 }
 
@@ -307,7 +308,7 @@ function acceptItem(
   accumulator?: TickAccumulator
 ): void {
   if (entity.kind === 'belt') {
-    const runtime = project.belts[entity.id]
+    const runtime = project.belts[entity.id] ??= {}
     if (!runtime.item) {
       runtime.item = { ...item, age: item.age + 1 }
       runtime.lastMovedTick = project.tick
@@ -443,7 +444,7 @@ function adjustedDuration(baseDuration: number, level = 1): number {
 }
 
 function beltMoveInterval(entity: FactoryEntity): number {
-  return entity.type === 'fast-belt' ? 1 : 2
+  return entity.type === 'belt' ? 2 : 1
 }
 
 function updateResearchLab(entity: FactoryEntity, project: FactoryProject, accumulator: TickAccumulator): void {
@@ -562,7 +563,8 @@ function nextTunnelTarget(project: FactoryProject, entity: FactoryEntity, index:
 }
 
 function findTunnelExit(entrance: FactoryEntity, index: EntityIndex): FactoryEntity | undefined {
-  for (let distance = 2; distance <= 5; distance += 1) {
+  const maxDistance = entrance.level && entrance.level >= 3 ? 9 : entrance.level && entrance.level >= 2 ? 7 : 5
+  for (let distance = 2; distance <= maxDistance; distance += 1) {
     const candidate = entityAt(index, nextPosition(entrance.position, entrance.direction, distance))
     if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
   }

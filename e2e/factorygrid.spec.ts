@@ -596,7 +596,7 @@ test('panning streams newly visible chunks before mouse release without deleting
     return saved.entities?.filter((entity) => entity.kind === 'belt').length ?? 0
   })
   expect(after).toBe(before)
-  await expect(page.locator('.factory-canvas-stage > canvas')).toHaveCount(6)
+  await expect(page.locator('.factory-canvas-stage > canvas')).toHaveCount(7)
   expect(await page.locator('.factory-render-layer.active').evaluateAll((nodes) => (
     nodes.every((node) => !(node as HTMLElement).style.transform)
   ))).toBe(true)
@@ -1000,6 +1000,104 @@ test('world map derives belt corners and machine links from the factory topology
   expect(assets).toContain('entityIndex?.get(positionKey(position))')
   expect(assets).not.toContain("entityIndex?.get(position.x + ':' + position.y)")
 })
+test('blueprint parameters, map bookmarks and adaptive performance controls are available', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.blueprint-options')).toBeVisible()
+  await expect(page.getByLabel('替换传送带等级')).toBeVisible()
+  await page.locator('.blueprint-options button').filter({ hasText: '0°' }).click()
+  await expect(page.locator('.blueprint-options')).toContainText('90°')
+  await page.keyboard.press('m')
+  await expect(page.locator('.world-map-bookmarks')).toBeVisible()
+  const before = await page.locator('.world-map-bookmark').count()
+  await page.getByTitle('添加当前地图中心').click()
+  await expect(page.locator('.world-map-bookmark')).toHaveCount(before + 1)
+
+  const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  expect(app).toContain("project.performance.fps < 44")
+  expect(app).toContain("? 'performance'")
+  expect(app).toContain("? 'balanced' : 'high'")
+  expect(renderer).toContain("project.performance?.quality === 'balanced' ? 1.5 : 2")
+})
+
+test('large factory workers and incremental chunk saves are wired into production', async () => {
+  const app = await import('node:fs/promises').then((fs) => fs.readFile('src/app/App.vue', 'utf8'))
+  const workerClient = await import('node:fs/promises').then((fs) => fs.readFile('src/engine/simulation/simulationWorkerClient.ts', 'utf8'))
+  const storage = await import('node:fs/promises').then((fs) => fs.readFile('src/utils/projectStorage.ts', 'utf8'))
+  const map = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/WorldMap.vue', 'utf8'))
+
+  expect(app).toContain('SimulationWorkerClient')
+  expect(workerClient).toContain('WORKER_ENTITY_THRESHOLD = 1800')
+  expect(storage).toContain("PROJECT_STORAGE_KEY + ':chunk:'")
+  expect(storage).toContain('groupEntitiesByChunk')
+  expect(map).toContain('worldMap.worker.ts')
+  expect(map).toContain("typeof OffscreenCanvas !== 'undefined'")
+})
+
+test('placing and deleting in a large factory keep the interaction frame responsive', async ({ page }) => {
+  await page.addInitScript(() => {
+    const project = {
+      id: 'edit-performance', name: 'edit-performance', tick: 0, running: false, renderAlpha: 0, speed: 1,
+      activeTool: 'belt', activeDirection: 'east', viewport: { x: 130, y: 88, zoom: 1 }, goals: [],
+      unlocked: ['belt'], entities: [] as Array<Record<string, unknown>>, belts: {} as Record<string, object>,
+      metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+      research: { points: 0, delivered: {}, progress: {}, consumed: {}, completed: [], maxMachineLevel: 1 },
+      performance: { fps: 60, frameTime: 16.7, quality: 'high' }, errors: [], events: [], blueprints: [], history: []
+    }
+    for (let index = 0; index < 6000; index += 1) {
+      const id = `edit-belt-${index}`
+      project.entities.push({
+        id, kind: 'belt', type: 'belt', label: 'belt', position: { x: index - 3000, y: 30 }, direction: 'east',
+        input: [], output: [], progress: 0, status: 'idle'
+      })
+      project.belts[id] = {}
+    }
+    localStorage.setItem('factorygrid-shapez-v4', JSON.stringify(project))
+  })
+  await page.goto('/')
+
+  await page.evaluate(() => {
+    const state = window as typeof window & { __editStores: number }
+    state.__editStores = 0
+    const originalSetItem = Storage.prototype.setItem
+    Storage.prototype.setItem = function (...args: [string, string]) {
+      state.__editStores += 1
+      return originalSetItem.apply(this, args)
+    }
+  })
+
+  const placement = await page.evaluate(() => new Promise<{ duration: number; stores: number }>((resolve) => {
+    const state = window as typeof window & { __editStores: number }
+    state.__editStores = 0
+    const target = document.querySelector('[data-testid="factory-canvas"]') as HTMLCanvasElement
+    const rect = target.getBoundingClientRect()
+    const start = performance.now()
+    target.dispatchEvent(new MouseEvent('click', {
+      bubbles: true, clientX: rect.left + 500, clientY: rect.top + 240, button: 0
+    }))
+    const duration = performance.now() - start
+    requestAnimationFrame(() => resolve({ duration, stores: state.__editStores }))
+  }))
+  expect(placement.duration).toBeLessThan(14)
+  expect(placement.stores).toBe(0)
+
+  const deletion = await page.evaluate(() => new Promise<{ duration: number; stores: number }>((resolve) => {
+    const state = window as typeof window & { __editStores: number }
+    state.__editStores = 0
+    const target = document.querySelector('[data-testid="factory-canvas"]') as HTMLCanvasElement
+    const rect = target.getBoundingClientRect()
+    const start = performance.now()
+    target.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: rect.left + 500, clientY: rect.top + 240, button: 2
+    }))
+    const duration = performance.now() - start
+    requestAnimationFrame(() => resolve({ duration, stores: state.__editStores }))
+  }))
+  expect(deletion.duration).toBeLessThan(14)
+  expect(deletion.stores).toBe(0)
+})
+
 test('machine placement preview rotates and commits the same direction as the placed entity', async ({ page }) => {
   await page.goto('/')
 
@@ -1015,6 +1113,12 @@ test('machine placement preview rotates and commits the same direction as the pl
   expect(southPreview.equals(eastPreview)).toBe(false)
 
   await canvas.click({ position: { x: 620, y: 260 } })
+  await page.waitForFunction(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ type: string; direction: string }>
+    }
+    return saved.entities?.filter((entity) => entity.type === 'cutter').at(-1)?.direction === 'south'
+  })
   const placedDirection = await page.evaluate(() => {
     const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
       entities?: Array<{ type: string; direction: string }>
@@ -1025,6 +1129,12 @@ test('machine placement preview rotates and commits the same direction as the pl
 
   await page.keyboard.press('r')
   await canvas.click({ position: { x: 620, y: 260 } })
+  await page.waitForFunction(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ type: string; direction: string }>
+    }
+    return saved.entities?.filter((entity) => entity.type === 'cutter').at(-1)?.direction === 'west'
+  })
   const replacement = await page.evaluate(() => {
     const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
       entities?: Array<{ type: string; direction: string; position: { x: number; y: number } }>

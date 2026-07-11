@@ -23,6 +23,19 @@
         @wheel.prevent="onWheel"
         @dblclick="onDoubleClick"
       ></canvas>
+      <aside class="world-map-bookmarks">
+        <div><strong>区域书签</strong><button type="button" title="添加当前地图中心" @click="addBookmark"><Plus :size="15" /></button></div>
+        <button
+          v-for="bookmark in bookmarks"
+          :key="bookmark.id"
+          class="world-map-bookmark"
+          type="button"
+          @click="focusBookmark(bookmark.position)"
+        >
+          <MapPin :size="14" /><span>{{ bookmark.name }}</span>
+          <X :size="13" @click.stop="emit('removeBookmark', bookmark.id)" />
+        </button>
+      </aside>
       <div class="world-map-hint"><kbd>M</kbd><span>返回工厂</span></div>
     </div>
   </div>
@@ -30,32 +43,37 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Scan, X, ZoomIn, ZoomOut } from '@lucide/vue'
+import { MapPin, Plus, Scan, X, ZoomIn, ZoomOut } from '@lucide/vue'
 import { shapeById } from '../../data/resources'
-import type { Direction, FactoryEntity, FactoryProject, ViewportState } from '../../models/factory'
+import type { Direction, FactoryEntity, FactoryProject, GridPosition, MapBookmark, ViewportState } from '../../models/factory'
 import { CELL } from '../../render/canvasRenderer'
 import { machinePortRoles, planBeltSprite } from '../../render/factoryAssets'
 
 const props = defineProps<{
   project: FactoryProject
   viewportSize: { width: number; height: number }
+  bookmarks: MapBookmark[]
 }>()
 
 const emit = defineEmits<{
   close: []
   viewportChange: [viewport: ViewportState]
+  addBookmark: [position: GridPosition]
+  removeBookmark: [id: string]
 }>()
 
 interface WorldBounds { minX: number; maxX: number; minY: number; maxY: number }
 
 const canvasRef = ref<HTMLCanvasElement>()
 const stageRef = ref<HTMLDivElement>()
-let baseCanvas: HTMLCanvasElement | undefined
+let baseCanvas: HTMLCanvasElement | ImageBitmap | undefined
 let baseTopology = ''
 let bounds: WorldBounds = { minX: -8, maxX: 8, minY: -6, maxY: 6 }
 let camera = { x: 0, y: 0, scale: 8 }
 let paintFrame = 0
 let resizeObserver: ResizeObserver | undefined
+let mapWorker: Worker | undefined
+let mapWorkerRequest = 0
 let drag: { pointerId: number; x: number; y: number; cameraX: number; cameraY: number; moved: boolean } | undefined
 
 const topologySignature = computed(() => props.project.entities.map((entity) => (
@@ -78,7 +96,7 @@ function factoryBounds(): WorldBounds {
   return { minX: minX - padding, maxX: maxX + padding, minY: minY - padding, maxY: maxY + padding }
 }
 
-function ensureBase(): HTMLCanvasElement {
+function ensureBase(): HTMLCanvasElement | ImageBitmap {
   const topology = topologySignature.value
   if (baseCanvas && baseTopology === topology) return baseCanvas
   baseTopology = topology
@@ -90,6 +108,15 @@ function ensureBase(): HTMLCanvasElement {
   canvas.width = Math.max(1, Math.ceil(worldWidth * pixelsPerCell))
   canvas.height = Math.max(1, Math.ceil(worldHeight * pixelsPerCell))
   const ctx = canvas.getContext('2d')
+  if (props.project.entities.length >= 1800 && typeof OffscreenCanvas !== 'undefined' && typeof Worker !== 'undefined') {
+    requestWorkerBase(topology, canvas.width, canvas.height, pixelsPerCell)
+    if (ctx) {
+      ctx.fillStyle = '#596474'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+    }
+    baseCanvas = canvas
+    return canvas
+  }
   if (ctx) {
     ctx.fillStyle = '#596474'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -102,6 +129,65 @@ function ensureBase(): HTMLCanvasElement {
   }
   baseCanvas = canvas
   return canvas
+}
+
+function requestWorkerBase(topology: string, width: number, height: number, pixelsPerCell: number): void {
+  mapWorker ??= new Worker(new URL('../../render/worldMap.worker.ts', import.meta.url), { type: 'module' })
+  const id = ++mapWorkerRequest
+  const entityIndex = new Map(props.project.entities.map((entity) => [positionKey(entity.position), entity]))
+  const lines: Array<{ x1: number; y1: number; x2: number; y2: number; dashed?: boolean }> = []
+  props.project.entities.filter((entity) => entity.kind === 'belt').forEach((entity) => {
+    const point = localPoint(entity, pixelsPerCell)
+    planBeltSprite(props.project, entity, entityIndex).connections.forEach((direction) => {
+      const end = connectionEnd(point, direction, pixelsPerCell * 0.52)
+      lines.push({ x1: point.x, y1: point.y, x2: end.x, y2: end.y })
+    })
+  })
+  props.project.entities.filter((entity) => entity.kind !== 'belt').forEach((entity) => {
+    const point = localPoint(entity, pixelsPerCell)
+    machinePortRoles(entity).filter((port) => portConnectsToNeighbor(entity, port.direction, entityIndex)).forEach((port) => {
+      const end = connectionEnd(point, port.direction, pixelsPerCell * 0.52)
+      lines.push({ x1: point.x, y1: point.y, x2: end.x, y2: end.y })
+    })
+  })
+  const handled = new Set<string>()
+  props.project.entities.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
+    if (handled.has(entrance.id)) return
+    const exit = findTunnelExit(entrance, entityIndex)
+    if (!exit) return
+    handled.add(entrance.id)
+    handled.add(exit.id)
+    const from = localPoint(entrance, pixelsPerCell)
+    const to = localPoint(exit, pixelsPerCell)
+    lines.push({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, dashed: true })
+  })
+  const points = props.project.entities.filter((entity) => entity.kind !== 'belt').map((entity) => {
+    const point = localPoint(entity, pixelsPerCell)
+    const sourceColor = entity.sourceShape ? shapeById[entity.sourceShape]?.color : undefined
+    return {
+      x: point.x,
+      y: point.y,
+      size: Math.max(3, pixelsPerCell * 0.72),
+      color: sourceColor ?? (entity.type === 'hub' ? '#f2d36d' : entity.type === 'research-lab' ? '#a987c3' : '#67b8a8')
+    }
+  })
+  mapWorker.onmessage = (event: MessageEvent<{ id: number; bitmap: ImageBitmap }>) => {
+    if (event.data.id !== id || baseTopology !== topology) {
+      event.data.bitmap.close()
+      return
+    }
+    if (baseCanvas instanceof ImageBitmap) baseCanvas.close()
+    baseCanvas = event.data.bitmap
+    schedulePaint()
+  }
+  mapWorker.postMessage({ id, width, height, lines, points })
+}
+
+function connectionEnd(point: { x: number; y: number }, direction: Direction, length: number): { x: number; y: number } {
+  if (direction === 'north') return { x: point.x, y: point.y - length }
+  if (direction === 'south') return { x: point.x, y: point.y + length }
+  if (direction === 'west') return { x: point.x - length, y: point.y }
+  return { x: point.x + length, y: point.y }
 }
 
 function localPoint(entity: FactoryEntity, pixelsPerCell: number): { x: number; y: number } {
@@ -213,7 +299,8 @@ function findTunnelExit(
   entrance: FactoryEntity,
   entityIndex: Map<string, FactoryEntity>
 ): FactoryEntity | undefined {
-  for (let distance = 2; distance <= 5; distance += 1) {
+  const maxDistance = entrance.level && entrance.level >= 3 ? 9 : entrance.level && entrance.level >= 2 ? 7 : 5
+  for (let distance = 2; distance <= maxDistance; distance += 1) {
     const candidate = entityIndex.get(positionKey(offsetPosition(entrance.position, entrance.direction, distance)))
     if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
   }
@@ -384,8 +471,19 @@ function onDoubleClick(event: MouseEvent): void {
   emit('close')
 }
 
+function addBookmark(): void {
+  emit('addBookmark', { x: Math.round(camera.x), y: Math.round(camera.y) })
+}
+
+function focusBookmark(position: GridPosition): void {
+  camera.x = position.x
+  camera.y = position.y
+  schedulePaint()
+}
+
 watch(() => props.project.viewport, schedulePaint, { deep: true })
 watch(topologySignature, () => {
+  if (baseCanvas instanceof ImageBitmap) baseCanvas.close()
   baseCanvas = undefined
   fitFactory()
 })
@@ -401,6 +499,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (paintFrame) window.cancelAnimationFrame(paintFrame)
+  if (baseCanvas instanceof ImageBitmap) baseCanvas.close()
+  mapWorker?.terminate()
   resizeObserver?.disconnect()
 })
 </script>

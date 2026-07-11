@@ -37,8 +37,9 @@ export const researchDefinitions: ResearchDefinition[] = [
   },
   {
     id: 'mass-production', name: '规模化生产',
-    description: '消耗效用研究包，开放 3 级机器并完成高级生产闭环。', cost: 20, durationTicks: 30,
-    prerequisites: ['automation-core'], requirements: [{ shape: 'utility-pack', amount: 20 }], maxMachineLevel: 3
+    description: '消耗效用研究包，开放 3 级机器、极速传送带与高级物流升级。', cost: 20, durationTicks: 30,
+    prerequisites: ['automation-core'], requirements: [{ shape: 'utility-pack', amount: 20 }],
+    unlockBuildings: ['express-belt'], maxMachineLevel: 3
   }
 ]
 

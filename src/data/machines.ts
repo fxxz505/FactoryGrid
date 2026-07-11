@@ -10,6 +10,7 @@ export const buildings: BuildingDefinition[] = [
   { id: 'source-copper', name: '铜矿发生器', kind: 'source', hotkey: '7', durationTicks: 12, description: '测试用棕色铜矿输出。' },
   { id: 'belt', name: '传送带', kind: 'belt', hotkey: 'B', durationTicks: 2, description: '沿当前方向运输物品，每两 tick 前进一格。' },
   { id: 'fast-belt', name: '高速传送带', kind: 'belt', hotkey: 'Q', durationTicks: 1, description: '研究解锁后使用，每 tick 前进一格。' },
+  { id: 'express-belt', name: '极速传送带', kind: 'belt', hotkey: 'E', durationTicks: 1, description: '规模化物流使用，保持每 tick 推进并配套高级物流升级。' },
   { id: 'splitter', name: '分流器', kind: 'processor', hotkey: 'F', durationTicks: 1, description: '从背面输入，在左右两侧出口之间交替分流。' },
   { id: 'merger', name: '合流器', kind: 'processor', hotkey: 'M', durationTicks: 1, description: '接收多路输入并按一个方向输出。' },
   { id: 'tunnel', name: '地下通道', kind: 'processor', hotkey: 'U', durationTicks: 1, description: '把物品跳过数格，用来跨越拥挤线路。' },

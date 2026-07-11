@@ -171,6 +171,64 @@ export function createFactoryChunkSnapshot(project: FactoryProject): FactoryChun
   }
 }
 
+export function updateFactoryChunkSnapshot(
+  snapshot: FactoryChunkSnapshot,
+  removed: FactoryEntity[],
+  added: FactoryEntity[]
+): void {
+  if (!removed.length && !added.length) return
+  const affectedChunks = new Set<string>()
+
+  removed.forEach((entity) => {
+    snapshot.entityIndex.delete(positionKey(entity.position))
+    const ownKey = factoryChunkKey(entity.position)
+    const ownEntities = snapshot.entities.get(ownKey)?.filter((candidate) => candidate.id !== entity.id)
+    if (ownEntities?.length) snapshot.entities.set(ownKey, ownEntities)
+    else snapshot.entities.delete(ownKey)
+    addAffectedChunks(affectedChunks, entity.position)
+  })
+
+  added.forEach((entity) => {
+    snapshot.entityIndex.set(positionKey(entity.position), entity)
+    const ownKey = factoryChunkKey(entity.position)
+    const ownEntities = snapshot.entities.get(ownKey)
+    if (ownEntities) ownEntities.push(entity)
+    else snapshot.entities.set(ownKey, [entity])
+    addAffectedChunks(affectedChunks, entity.position)
+  })
+
+  affectedChunks.forEach((key) => {
+    const [chunkX, chunkY] = key.split(':').map(Number)
+    const minX = chunkX * FACTORY_CHUNK_CELLS - 1
+    const maxX = (chunkX + 1) * FACTORY_CHUNK_CELLS
+    const minY = chunkY * FACTORY_CHUNK_CELLS - 1
+    const maxY = (chunkY + 1) * FACTORY_CHUNK_CELLS
+    const nearby: FactoryEntity[] = []
+    for (let sourceY = chunkY - 1; sourceY <= chunkY + 1; sourceY += 1) {
+      for (let sourceX = chunkX - 1; sourceX <= chunkX + 1; sourceX += 1) {
+        nearby.push(...(snapshot.entities.get(sourceX + ':' + sourceY) ?? []))
+      }
+    }
+    const signature = nearby
+      .filter((entity) => entity.position.x >= minX && entity.position.x <= maxX
+        && entity.position.y >= minY && entity.position.y <= maxY)
+      .map(entityVisualSignature)
+      .join('|')
+    if (signature) snapshot.signatures.set(key, signature)
+    else snapshot.signatures.delete(key)
+  })
+}
+
+function addAffectedChunks(keys: Set<string>, position: GridPosition): void {
+  const minChunkX = chunkCoordinate(position.x - 1)
+  const maxChunkX = chunkCoordinate(position.x + 1)
+  const minChunkY = chunkCoordinate(position.y - 1)
+  const maxChunkY = chunkCoordinate(position.y + 1)
+  for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) keys.add(chunkX + ':' + chunkY)
+  }
+}
+
 export function gridToScreen(position: GridPosition, viewport: ViewportState = DEFAULT_VIEWPORT): { x: number; y: number } {
   return {
     x: viewport.x + position.x * CELL * viewport.zoom,
@@ -197,6 +255,14 @@ export interface FactoryRenderScene {
   entityIndex: Map<string, FactoryEntity>
   beltPlans: Map<string, BeltSpritePlan>
   beltInputs: Map<string, Direction>
+}
+
+export interface CargoRenderPoint {
+  x: number
+  y: number
+  radius: number
+  color: string
+  sides: number
 }
 
 export function createFactoryRenderScene(
@@ -277,6 +343,31 @@ export function renderFactoryDynamicCanvas(
   if (!ctx) return
   ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
   renderDynamicItems(ctx, project, renderAlpha, scene, viewport)
+}
+
+export function collectFactoryCargoPoints(
+  project: FactoryProject,
+  renderAlpha: number,
+  scene: FactoryRenderScene,
+  viewport: ViewportState = project.viewport ?? DEFAULT_VIEWPORT
+): CargoRenderPoint[] {
+  const radius = BELT_ITEM_RADIUS * viewport.zoom
+  const points: CargoRenderPoint[] = []
+  scene.belts.forEach((entity) => {
+    const runtime = project.belts[entity.id]
+    if (!runtime?.item) return
+    const screen = gridToScreen(entity.position, viewport)
+    const size = CELL * viewport.zoom
+    const point = beltItemPoint(project, entity, screen.x, screen.y, size, renderAlpha, scene.beltInputs.get(entity.id))
+    const definition = shapeById[runtime.item.shape]
+    points.push({
+      ...point,
+      radius,
+      color: definition?.color ?? '#647278',
+      sides: definition?.tier === undefined || definition.tier === 0 ? 0 : definition.tier + 2
+    })
+  })
+  return points
 }
 
 export function renderFactoryMachineOverlayCanvas(
@@ -533,7 +624,9 @@ function prepareCanvas(canvas: HTMLCanvasElement, project: FactoryProject): Canv
 }
 
 function renderPixelRatio(project: FactoryProject): number {
-  const ratioCap = project.performance?.quality === 'performance' ? 1.25 : 2
+  const ratioCap = project.performance?.quality === 'performance'
+    ? 1.25
+    : project.performance?.quality === 'balanced' ? 1.5 : 2
   return Math.min(window.devicePixelRatio || 1, ratioCap)
 }
 
@@ -770,7 +863,7 @@ function drawBeltPreview(ctx: CanvasRenderingContext2D, viewport: ViewportState,
 }
 
 function previewProject(preview: BeltPreview): FactoryProject {
-  const type = preview.tool === 'tunnel' ? 'tunnel' : 'belt'
+  const type = preview.tool === 'tunnel' ? 'tunnel' : preview.beltType ?? 'belt'
   return {
     id: 'preview',
     name: 'preview',
@@ -802,6 +895,7 @@ function previewProject(preview: BeltPreview): FactoryProject {
     errors: [],
     events: [],
     blueprints: [],
+    mapBookmarks: [],
     history: []
   }
 }
@@ -858,7 +952,8 @@ function findTunnelExit(
   entrance: FactoryEntity,
   entityIndex?: Map<string, FactoryEntity>
 ): FactoryEntity | undefined {
-  for (let distance = 2; distance <= 5; distance += 1) {
+  const maxDistance = entrance.level && entrance.level >= 3 ? 9 : entrance.level && entrance.level >= 2 ? 7 : 5
+  for (let distance = 2; distance <= maxDistance; distance += 1) {
     const position = offsetPosition(entrance.position, entrance.direction, distance)
     const candidate = entityIndex?.get(positionKey(position)) ?? entityAtCell(project, position)
     if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
@@ -894,7 +989,7 @@ function drawBelt(
   cachedPlan?: BeltSpritePlan
 ): void {
   const plan = cachedPlan ?? planBeltSprite(project, entity)
-  drawBeltAsset(ctx, x, y, size, plan, entity.type === 'fast-belt')
+  drawBeltAsset(ctx, x, y, size, plan, entity.type !== 'belt', entity.type === 'express-belt')
 }
 
 function beltItemPoint(
@@ -933,7 +1028,7 @@ export function beltPathPoint(
   return lerpPoint(center, to, (t - 0.5) / 0.5)
 }
 function beltMoveInterval(entity: FactoryEntity): number {
-  return entity.type === 'fast-belt' ? 1 : 2
+  return entity.type === 'belt' ? 2 : 1
 }
 
 function beltFrameProgress(project: FactoryProject, renderAlpha = 0): number {
@@ -1232,7 +1327,15 @@ function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometrySt
   }
 }
 
-function drawBeltAsset(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, plan: BeltSpritePlan, fast = false): void {
+function drawBeltAsset(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  plan: BeltSpritePlan,
+  fast = false,
+  express = false
+): void {
   const track = size * 0.62
   const cx = x + size / 2
   const cy = y + size / 2
@@ -1245,13 +1348,13 @@ function drawBeltAsset(ctx: CanvasRenderingContext2D, x: number, y: number, size
   ctx.shadowBlur = size * 0.05
   ctx.shadowOffsetY = size * 0.03
 
-  ctx.fillStyle = fast ? '#78938f' : '#bfc4c7'
+  ctx.fillStyle = express ? '#6d737a' : fast ? '#78938f' : '#bfc4c7'
   connections.forEach((direction) => drawBeltArm(ctx, x, y, size, direction, track + size * 0.12))
   roundRect(ctx, cx - (track + size * 0.12) / 2, cy - (track + size * 0.12) / 2, track + size * 0.12, track + size * 0.12, size * 0.08)
   ctx.fill()
 
   ctx.shadowColor = 'transparent'
-  ctx.fillStyle = fast ? '#b8d1cc' : '#dfe3e5'
+  ctx.fillStyle = express ? '#e2d493' : fast ? '#b8d1cc' : '#dfe3e5'
   connections.forEach((direction) => drawBeltArm(ctx, x, y, size, direction, track))
   roundRect(ctx, cx - track / 2, cy - track / 2, track, track, size * 0.07)
   ctx.fill()

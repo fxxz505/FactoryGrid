@@ -5,7 +5,7 @@
     <div><strong>堵塞</strong><span>{{ errors.length }}</span></div>
     <div class="performance-readout" :class="performanceTone">
       <strong>性能</strong>
-      <span>{{ performance.fps }} FPS · {{ performance.frameTime.toFixed(1) }} ms · {{ performance.quality === 'high' ? '清晰' : '流畅' }}</span>
+      <span>{{ performance.fps }} FPS · {{ performance.frameTime.toFixed(1) }} ms · {{ qualityLabel }} · {{ performance.simulationMode === 'worker' ? '后台模拟' : '主线程模拟' }}</span>
     </div>
     <div class="event-stream"><strong>事件日志</strong><span>{{ events[0]?.message ?? '点击运行，让物品开始流动' }}</span></div>
   </footer>
@@ -23,6 +23,7 @@ const props = defineProps<{
 }>()
 
 const performanceTone = computed(() => props.performance.fps >= 55 ? 'good' : props.performance.fps >= 40 ? 'warn' : 'bad')
+const qualityLabel = computed(() => props.performance.quality === 'high' ? '清晰' : props.performance.quality === 'balanced' ? '均衡' : '流畅')
 function total(record: Record<string, number>): number {
   return Object.values(record).reduce((sum, amount) => sum + amount, 0)
 }

@@ -24,7 +24,7 @@ export function createEntity(overrides: Partial<FactoryEntity> & Pick<FactoryEnt
 
 function inferKind(type: BuildingType): FactoryEntity['kind'] {
   if (type.startsWith('source-')) return 'source'
-  if (type === 'belt' || type === 'fast-belt') return 'belt'
+  if (type === 'belt' || type === 'fast-belt' || type === 'express-belt') return 'belt'
   if (type === 'hub') return 'hub'
   return 'processor'
 }
@@ -125,6 +125,9 @@ export function createShapezProject(): FactoryProject {
         height: 0,
         createdAt: '2026-07-06T00:00:00.000Z'
       }
+    ],
+    mapBookmarks: [
+      { id: 'bookmark-origin', name: '主工厂', position: { x: 4, y: 4 } }
     ],
     history: []
   }

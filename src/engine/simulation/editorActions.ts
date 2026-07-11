@@ -1,7 +1,8 @@
 import { buildingById } from '../../data/machines'
-import { createEntity, cloneProject } from '../../data/examples'
+import { createEntity } from '../../data/examples'
 import type {
   Blueprint,
+  BlueprintPasteOptions,
   BuildingType,
   Direction,
   FactoryEntity,
@@ -10,9 +11,35 @@ import type {
 } from '../../models/factory'
 
 const UPGRADABLE_MACHINES: BuildingType[] = [
+  'splitter', 'merger', 'tunnel',
   'cutter', 'rotator', 'painter-red', 'painter-blue', 'painter-green',
   'stacker', 'furnace', 'assembler'
 ]
+
+export interface EditorTopologyMutation {
+  added: FactoryEntity[]
+  removed: FactoryEntity[]
+}
+
+const editorMutations = new WeakMap<FactoryProject, EditorTopologyMutation>()
+
+export function editorTopologyMutation(project: FactoryProject): EditorTopologyMutation | undefined {
+  return editorMutations.get(project)
+}
+
+function cloneProjectForEdit(project: FactoryProject): FactoryProject {
+  return {
+    ...project,
+    entities: [...project.entities],
+    belts: project.belts,
+    history: [...project.history]
+  }
+}
+
+function recordMutation(next: FactoryProject, removed: FactoryEntity[], added: FactoryEntity[]): FactoryProject {
+  editorMutations.set(next, { added, removed })
+  return next
+}
 
 export function rotateDirection(direction: Direction): Direction {
   if (direction === 'north') return 'east'
@@ -25,12 +52,13 @@ export function rotateSelectedEntity(project: FactoryProject): FactoryProject {
   if (!project.selectedEntityId) return project
   const selected = project.entities.find((entity) => entity.id === project.selectedEntityId)
   if (!selected) return project
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
+  let replacement: FactoryEntity | undefined
   next.entities = next.entities.map((entity) => entity.id === project.selectedEntityId
-    ? { ...entity, direction: rotateDirection(entity.direction) }
+    ? (replacement = { ...entity, direction: rotateDirection(entity.direction) })
     : entity)
-  return next
+  return recordMutation(next, [selected], replacement ? [replacement] : [])
 }
 
 export function placeBuilding(
@@ -39,9 +67,9 @@ export function placeBuilding(
   position: GridPosition,
   direction: Direction
 ): FactoryProject {
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
-  removeAt(next, position)
+  const removed = removeAt(next, position)
   const entity = createPlacementEntity(
     type,
     position,
@@ -49,9 +77,12 @@ export function placeBuilding(
     type + '-' + Date.now().toString(36) + '-' + Math.abs(position.x) + '-' + Math.abs(position.y)
   )
   next.entities.push(entity)
-  if (isBelt(entity)) next.belts[entity.id] = {}
+  if (isBelt(entity)) {
+    if (next.belts === project.belts) next.belts = { ...project.belts }
+    next.belts[entity.id] = {}
+  }
   next.selectedEntityId = entity.id
-  return next
+  return recordMutation(next, removed, [entity])
 }
 
 export function createPlacementEntity(
@@ -64,23 +95,27 @@ export function createPlacementEntity(
 }
 
 export function deleteAt(project: FactoryProject, position: GridPosition): FactoryProject {
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
-  removeAt(next, position)
+  const removed = removeAt(next, position)
   next.selectedEntityId = next.entities[0]?.id
-  return next
+  return recordMutation(next, removed, [])
 }
 
 export function deleteArea(project: FactoryProject, start: GridPosition, end: GridPosition): FactoryProject {
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
   const area = normalizeArea(start, end)
   const removed = next.entities.filter((entity) => inArea(entity.position, area.min, area.max))
   const removedIds = new Set(removed.map((entity) => entity.id))
   next.entities = next.entities.filter((entity) => !removedIds.has(entity.id))
-  removedIds.forEach((id) => delete next.belts[id])
+  const runtimeIds = removed.filter(isBelt).map((entity) => entity.id).filter((id) => project.belts[id] !== undefined)
+  if (runtimeIds.length) {
+    next.belts = { ...project.belts }
+    runtimeIds.forEach((id) => delete next.belts[id])
+  }
   next.selectedEntityId = next.entities[0]?.id
-  return next
+  return recordMutation(next, removed, [])
 }
 
 export function buildBeltLine(
@@ -90,11 +125,13 @@ export function buildBeltLine(
   direction?: Direction,
   type: BuildingType = 'belt'
 ): FactoryProject {
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
   const route = type === 'tunnel' ? tunnelRoute(start, end, direction) : beltRoute(start, end, direction)
+  const removed: FactoryEntity[] = []
+  const added: FactoryEntity[] = []
   route.forEach(({ position, direction: beltDirection }, index) => {
-    removeAt(next, position)
+    removed.push(...removeAt(next, position))
     const entity = createEntity({
       id: type + '-' + Date.now().toString(36) + '-' + position.x + '-' + position.y + '-' + index,
       type,
@@ -102,10 +139,14 @@ export function buildBeltLine(
       direction: beltDirection
     })
     next.entities.push(entity)
-    if (isBelt(entity)) next.belts[entity.id] = {}
+    added.push(entity)
+    if (isBelt(entity)) {
+      if (next.belts === project.belts) next.belts = { ...project.belts }
+      next.belts[entity.id] = {}
+    }
   })
   next.selectedEntityId = next.entities[next.entities.length - 1]?.id
-  return next
+  return recordMutation(next, removed, added)
 }
 
 export function copyAreaToBlueprint(
@@ -137,16 +178,29 @@ export function copyAreaToBlueprint(
 }
 
 export function pasteBlueprint(project: FactoryProject, blueprint: Blueprint, anchor: GridPosition): FactoryProject {
-  const next = cloneProject(project)
+  return pasteBlueprintWithOptions(project, blueprint, anchor, { rotation: 0, mirrorX: false, beltTier: 'keep' })
+}
+
+export function pasteBlueprintWithOptions(
+  project: FactoryProject,
+  blueprint: Blueprint,
+  anchor: GridPosition,
+  options: BlueprintPasteOptions
+): FactoryProject {
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
+  const removed: FactoryEntity[] = []
+  const added: FactoryEntity[] = []
   blueprint.entities.forEach((saved, index) => {
-    const position = { x: anchor.x + saved.offset.x, y: anchor.y + saved.offset.y }
-    removeAt(next, position)
+    const transformed = transformBlueprintOffset(saved.offset, blueprint, options)
+    const position = { x: anchor.x + transformed.x, y: anchor.y + transformed.y }
+    const type = replaceBlueprintBeltTier(saved.type, options.beltTier)
+    removed.push(...removeAt(next, position))
     const entity = createEntity({
-      id: saved.type + '-paste-' + Date.now().toString(36) + '-' + index,
-      type: saved.type,
+      id: type + '-paste-' + Date.now().toString(36) + '-' + index,
+      type,
       position,
-      direction: saved.direction,
+      direction: transformBlueprintDirection(saved.direction, options),
       recipeId: saved.recipeId,
       level: saved.level,
       input: [],
@@ -155,26 +209,71 @@ export function pasteBlueprint(project: FactoryProject, blueprint: Blueprint, an
       status: 'idle'
     })
     next.entities.push(entity)
-    if (isBelt(entity)) next.belts[entity.id] = {}
+    added.push(entity)
+    if (isBelt(entity)) {
+      if (next.belts === project.belts) next.belts = { ...project.belts }
+      next.belts[entity.id] = {}
+    }
   })
   next.selectedEntityId = next.entities[next.entities.length - 1]?.id
+  return recordMutation(next, removed, added)
+}
+
+function transformBlueprintOffset(
+  offset: GridPosition,
+  blueprint: Blueprint,
+  options: BlueprintPasteOptions
+): GridPosition {
+  let x = options.mirrorX ? blueprint.width - 1 - offset.x : offset.x
+  let y = offset.y
+  if (options.rotation === 90) [x, y] = [blueprint.height - 1 - y, x]
+  else if (options.rotation === 180) [x, y] = [blueprint.width - 1 - x, blueprint.height - 1 - y]
+  else if (options.rotation === 270) [x, y] = [y, blueprint.width - 1 - x]
+  return { x, y }
+}
+
+function transformBlueprintDirection(direction: Direction, options: BlueprintPasteOptions): Direction {
+  let next = options.mirrorX
+    ? direction === 'east' ? 'west' : direction === 'west' ? 'east' : direction
+    : direction
+  const turns = options.rotation / 90
+  for (let index = 0; index < turns; index += 1) next = rotateDirection(next)
   return next
+}
+
+function replaceBlueprintBeltTier(type: BuildingType, tier: BlueprintPasteOptions['beltTier']): BuildingType {
+  if (tier === 'keep' || !['belt', 'fast-belt', 'express-belt'].includes(type)) return type
+  return tier
 }
 
 export function upgradeArea(project: FactoryProject, start: GridPosition, end: GridPosition): FactoryProject {
   if (!project.research.completed.includes('automation-upgrade')) return project
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   pushHistory(next)
   const area = normalizeArea(start, end)
+  const removed: FactoryEntity[] = []
+  const added: FactoryEntity[] = []
   next.entities = next.entities.map((entity) => {
     if (!inArea(entity.position, area.min, area.max)) return entity
     if (entity.type === 'belt') {
-      return { ...entity, type: 'fast-belt', label: buildingById['fast-belt'].name }
+      const replacement = { ...entity, type: 'fast-belt' as const, label: buildingById['fast-belt'].name }
+      removed.push(entity)
+      added.push(replacement)
+      return replacement
+    }
+    if (entity.type === 'fast-belt' && project.research.completed.includes('mass-production')) {
+      const replacement = { ...entity, type: 'express-belt' as const, label: buildingById['express-belt'].name }
+      removed.push(entity)
+      added.push(replacement)
+      return replacement
     }
     if (!UPGRADABLE_MACHINES.includes(entity.type)) return entity
-    return { ...entity, level: Math.min(project.research.maxMachineLevel, (entity.level ?? 1) + 1) }
+    const replacement = { ...entity, level: Math.min(project.research.maxMachineLevel, (entity.level ?? 1) + 1) }
+    removed.push(entity)
+    added.push(replacement)
+    return replacement
   })
-  return next
+  return recordMutation(next, removed, added)
 }
 
 export function tunnelRoute(start: GridPosition, end: GridPosition, preferred?: Direction): Array<{ position: GridPosition; direction: Direction }> {
@@ -198,14 +297,17 @@ export function beltRoute(start: GridPosition, end: GridPosition, preferred?: Di
 
 export function undo(project: FactoryProject): FactoryProject {
   if (!project.history.length) return project
-  const next = cloneProject(project)
+  const next = cloneProjectForEdit(project)
   const previous = next.history[next.history.length - 1]
   next.history = next.history.slice(0, -1)
   next.entities = previous
   next.belts = Object.fromEntries(
-    next.entities.filter(isBelt).map((entity) => [entity.id, {}])
+    next.entities.filter(isBelt).flatMap((entity) => {
+      const runtime = project.belts[entity.id]
+      return runtime?.item ? [[entity.id, runtime]] : []
+    })
   )
-  return next
+  return recordMutation(next, project.entities, next.entities)
 }
 
 export function cellId(position: GridPosition): string {
@@ -241,10 +343,20 @@ export function cellsBetween(start: GridPosition, end: GridPosition, preferred?:
   return cells
 }
 
-function removeAt(project: FactoryProject, position: GridPosition): void {
-  const removed = project.entities.filter((entity) => samePosition(entity.position, position))
-  removed.forEach((entity) => delete project.belts[entity.id])
-  project.entities = project.entities.filter((entity) => !samePosition(entity.position, position))
+function removeAt(project: FactoryProject, position: GridPosition): FactoryEntity[] {
+  const removed: FactoryEntity[] = []
+  const kept: FactoryEntity[] = []
+  project.entities.forEach((entity) => {
+    if (samePosition(entity.position, position)) removed.push(entity)
+    else kept.push(entity)
+  })
+  const runtimeIds = removed.map((entity) => entity.id).filter((id) => project.belts[id] !== undefined)
+  if (runtimeIds.length) {
+    project.belts = { ...project.belts }
+    runtimeIds.forEach((id) => delete project.belts[id])
+  }
+  project.entities = kept
+  return removed
 }
 
 function pushHistory(project: FactoryProject): void {
@@ -267,7 +379,7 @@ function samePosition(a: GridPosition, b: GridPosition): boolean {
 }
 
 function isBelt(entity: FactoryEntity): boolean {
-  return entity.type === 'belt' || entity.type === 'fast-belt'
+  return entity.type === 'belt' || entity.type === 'fast-belt' || entity.type === 'express-belt'
 }
 
 function inferDirection(start: GridPosition, end: GridPosition, preferred?: Direction): Direction {

@@ -32,6 +32,7 @@
         aria-hidden="true"
       ></canvas>
       <canvas ref="dynamicCanvasRef" class="factory-canvas-dynamic factory-render-layer active" aria-hidden="true"></canvas>
+      <canvas ref="gpuCargoCanvasRef" class="factory-canvas-dynamic factory-render-layer active factory-canvas-gpu-cargo" aria-hidden="true"></canvas>
       <canvas
         ref="machineOverlayCanvasARef"
         class="factory-canvas-dynamic factory-canvas-machine-overlay factory-render-layer"
@@ -64,15 +65,21 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { buildings } from '../../data/machines'
 import type { AreaPreview, BeltPreview, BuildingType, Direction, FactoryProject, GridPosition, ViewportState } from '../../models/factory'
-import { beltRoute, createPlacementEntity, tunnelRoute } from '../../engine/simulation/editorActions'
+import { beltRoute, createPlacementEntity, tunnelRoute, type EditorTopologyMutation } from '../../engine/simulation/editorActions'
 import {
   CELL, areVisibleFactoryChunksCached, clearFactoryChunkRenderCache, createFactoryChunkRenderCache, createFactoryChunkSnapshot,
-  createFactoryRenderScene, entityAtPoint, renderFactoryDynamicCanvas, renderFactoryMachineOverlayCanvas,
-  renderFactoryStaticCanvas, screenToGrid, prewarmFactoryChunks,
+  collectFactoryCargoPoints, createFactoryRenderScene, entityAtPoint, renderFactoryDynamicCanvas, renderFactoryMachineOverlayCanvas,
+  renderFactoryStaticCanvas, screenToGrid, prewarmFactoryChunks, updateFactoryChunkSnapshot,
   type FactoryChunkSnapshot, type FactoryRenderScene, type PlacementPreview
 } from '../../render/canvasRenderer'
+import { WebglCargoRenderer } from '../../render/webglCargoRenderer'
 
-const props = defineProps<{ project: FactoryProject; selectedEntityId?: string }>()
+const props = defineProps<{
+  project: FactoryProject
+  selectedEntityId?: string
+  topologyRevision: number
+  topologyMutation?: EditorTopologyMutation
+}>()
 
 const emit = defineEmits<{
   select: [id: string]
@@ -88,6 +95,7 @@ const emit = defineEmits<{
 const staticCanvasARef = ref<HTMLCanvasElement>()
 const staticCanvasBRef = ref<HTMLCanvasElement>()
 const dynamicCanvasRef = ref<HTMLCanvasElement>()
+const gpuCargoCanvasRef = ref<HTMLCanvasElement>()
 const machineOverlayCanvasARef = ref<HTMLCanvasElement>()
 const machineOverlayCanvasBRef = ref<HTMLCanvasElement>()
 const inputCanvasRef = ref<HTMLCanvasElement>()
@@ -113,9 +121,6 @@ let panCommitScene: FactoryRenderScene | undefined
 const activeRenderLayer = ref<0 | 1>(0)
 const PAN_STREAM_THRESHOLD = 120
 const SIMULATION_STEP_MS = 170
-const topologySignature = computed(() => props.project.entities.map((entity) => (
-  `${entity.id}:${entity.type}:${entity.position.x}:${entity.position.y}:${entity.direction}:${entity.level ?? 1}`
-)).join('|'))
 let staticPaintFrame = 0
 let animationFrame = 0
 let prewarmHandle = 0
@@ -125,14 +130,16 @@ let sceneViewport: ViewportState | undefined
 const SCENE_OVERSCAN_CELLS = 8
 const chunkCache = createFactoryChunkRenderCache()
 let chunkSnapshot: FactoryChunkSnapshot | undefined
-let chunkTopology = ''
+let chunkTopologyRevision = -1
 let lastTick = props.project.tick
 let tickStartedAt = performance.now()
 let lastAnimationTime = performance.now()
 let renderedViewport: ViewportState = { ...props.project.viewport }
+let gpuCargoRenderer: WebglCargoRenderer | undefined
+const GPU_CARGO_THRESHOLD = 900
 
 const preview = computed<BeltPreview | undefined>(() => {
-  if (!isDragging.value || !dragStart.value || !dragEnd.value || !['belt', 'fast-belt', 'tunnel'].includes(props.project.activeTool)) return undefined
+  if (!isDragging.value || !dragStart.value || !dragEnd.value || !['belt', 'fast-belt', 'express-belt', 'tunnel'].includes(props.project.activeTool)) return undefined
   const route = props.project.activeTool === 'tunnel'
     ? tunnelRoute(dragStart.value, dragEnd.value, props.project.activeDirection)
     : beltRoute(dragStart.value, dragEnd.value, props.project.activeDirection)
@@ -141,7 +148,10 @@ const preview = computed<BeltPreview | undefined>(() => {
     route,
     direction: route[0]?.direction ?? props.project.activeDirection,
     valid: route.length > 0,
-    tool: props.project.activeTool === 'tunnel' ? 'tunnel' : 'belt'
+    tool: props.project.activeTool === 'tunnel' ? 'tunnel' : 'belt',
+    beltType: props.project.activeTool === 'fast-belt'
+      ? 'fast-belt'
+      : props.project.activeTool === 'express-belt' ? 'express-belt' : 'belt'
   }
 })
 
@@ -154,7 +164,7 @@ const areaPreview = computed<AreaPreview | undefined>(() => {
 })
 
 const previewableMachines = new Set<BuildingType>(
-  buildings.map((building) => building.id).filter((type) => !['belt', 'fast-belt', 'tunnel'].includes(type))
+  buildings.map((building) => building.id).filter((type) => !['belt', 'fast-belt', 'express-belt', 'tunnel'].includes(type))
 )
 
 const placementPreview = computed<PlacementPreview | undefined>(() => {
@@ -179,18 +189,25 @@ function selectionState() {
   }
 }
 
+function syncChunkSnapshot(project: FactoryProject): void {
+  if (chunkSnapshot && chunkTopologyRevision === props.topologyRevision) return
+  if (chunkSnapshot && props.topologyMutation && chunkTopologyRevision + 1 === props.topologyRevision) {
+    updateFactoryChunkSnapshot(chunkSnapshot, props.topologyMutation.removed, props.topologyMutation.added)
+  } else {
+    chunkSnapshot = createFactoryChunkSnapshot(project)
+  }
+  chunkTopologyRevision = props.topologyRevision
+}
+
 function paintStatic(): void {
   if (staticPaintFrame) window.cancelAnimationFrame(staticPaintFrame)
   staticPaintFrame = 0
   const canvas = activeStaticCanvas()
   if (!canvas) return
   const project = toRaw(props.project)
-  if (!chunkSnapshot || chunkTopology !== topologySignature.value) {
-    chunkTopology = topologySignature.value
-    chunkSnapshot = createFactoryChunkSnapshot(project)
-  }
+  syncChunkSnapshot(project)
   const nextSceneKey = [
-    topologySignature.value,
+    props.topologyRevision,
     project.viewport.zoom,
     canvas.clientWidth,
     canvas.clientHeight
@@ -279,7 +296,14 @@ function paintDynamicFrame(time: number, viewport: ViewportState = renderedViewp
   if (!scene) scene = createFactoryRenderScene(staticCanvas, project)
   const stepMs = SIMULATION_STEP_MS / Math.max(1, props.project.speed)
   const renderAlpha = props.project.running ? Math.min(1, Math.max(0, (time - tickStartedAt) / stepMs)) : 0
-  renderFactoryDynamicCanvas(canvas, project, renderAlpha, scene, viewport)
+  const cargoCount = project.metrics.beltItems
+  if (cargoCount >= GPU_CARGO_THRESHOLD && gpuCargoRenderer?.available) {
+    renderFactoryDynamicCanvas(canvas, project, renderAlpha, { ...scene, belts: [] }, viewport)
+    gpuCargoRenderer.render(collectFactoryCargoPoints(project, renderAlpha, scene, viewport))
+  } else {
+    gpuCargoRenderer?.clear()
+    renderFactoryDynamicCanvas(canvas, project, renderAlpha, scene, viewport)
+  }
 }
 function point(event: MouseEvent): { x: number; y: number } {
   const rect = (event.target as HTMLCanvasElement).getBoundingClientRect()
@@ -311,7 +335,7 @@ function onClick(event: MouseEvent): void {
 }
 
 function canvasLayers(): HTMLCanvasElement[] {
-  return [activeStaticCanvas(), dynamicCanvasRef.value, activeOverlayCanvas()]
+  return [activeStaticCanvas(), dynamicCanvasRef.value, gpuCargoCanvasRef.value, activeOverlayCanvas()]
     .filter((canvas): canvas is HTMLCanvasElement => Boolean(canvas))
 }
 
@@ -433,10 +457,7 @@ function preparePanStaticBuffer(): void {
     finishPanCommitFallback()
     return
   }
-  if (!chunkSnapshot || chunkTopology !== topologySignature.value) {
-    chunkTopology = topologySignature.value
-    chunkSnapshot = createFactoryChunkSnapshot(project)
-  }
+  syncChunkSnapshot(project)
   panCommitScene = createFactoryRenderScene(buffer, project, chunkSnapshot, SCENE_OVERSCAN_CELLS)
   renderFactoryStaticCanvas(buffer, project, selectionState(), panCommitScene, chunkCache, chunkSnapshot)
   schedulePanCommitStage(preparePanOverlayBuffer)
@@ -479,7 +500,7 @@ function swapPanCommitBuffers(time: number): void {
   activeRenderLayer.value = activeRenderLayer.value === 0 ? 1 : 0
   scene = panCommitScene
   sceneViewport = { ...props.project.viewport }
-  sceneKey = [topologySignature.value, props.project.viewport.zoom, nextStaticCanvas.clientWidth, nextStaticCanvas.clientHeight].join('|')
+  sceneKey = [props.topologyRevision, props.project.viewport.zoom, nextStaticCanvas.clientWidth, nextStaticCanvas.clientHeight].join('|')
   renderedViewport = { ...props.project.viewport }
   paintDynamicFrame(time, renderedViewport)
   syncStageGrid(renderedViewport)
@@ -596,7 +617,7 @@ function onUp(event: MouseEvent): void {
   if (['copy-area', 'delete-area', 'upgrade-area'].includes(props.project.activeTool)) {
     emit('areaAction', start, end)
     handledDrag = true
-  } else if (moved && ['belt', 'fast-belt', 'tunnel'].includes(props.project.activeTool)) {
+  } else if (moved && ['belt', 'fast-belt', 'express-belt', 'tunnel'].includes(props.project.activeTool)) {
     emit('dragBelt', start, end, direction)
     handledDrag = true
   }
@@ -663,7 +684,7 @@ function mod(value: number, divisor: number): number {
 
 watch(
   () => [
-    topologySignature.value, props.selectedEntityId, props.project.activeTool,
+    props.topologyRevision, props.selectedEntityId, props.project.activeTool,
     props.project.activeDirection, props.project.viewport.x, props.project.viewport.y,
     props.project.viewport.zoom, props.project.performance.quality
   ],
@@ -673,6 +694,7 @@ watch(preview, scheduleStaticPaint, { deep: true })
 watch(areaPreview, scheduleStaticPaint, { deep: true })
 watch(placementPreview, scheduleStaticPaint, { deep: true })
 onMounted(() => {
+  if (gpuCargoCanvasRef.value) gpuCargoRenderer = new WebglCargoRenderer(gpuCargoCanvasRef.value)
   paintStatic()
   animationFrame = window.requestAnimationFrame(animateItems)
   window.addEventListener('resize', scheduleStaticPaint)

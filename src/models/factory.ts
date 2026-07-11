@@ -48,6 +48,7 @@ export type BuildingType =
   | 'source-copper'
   | 'belt'
   | 'fast-belt'
+  | 'express-belt'
   | 'splitter'
   | 'merger'
   | 'tunnel'
@@ -68,7 +69,9 @@ export type Direction = 'north' | 'east' | 'south' | 'west'
 export type EntityStatus = 'idle' | 'running' | 'waiting' | 'blocked' | 'delivering'
 export type AreaTool = 'copy-area' | 'paste-blueprint' | 'delete-area' | 'upgrade-area'
 export type ToolId = BuildingType | 'select' | 'pan' | 'delete' | AreaTool
-export type RenderQuality = 'high' | 'performance'
+export type RenderQuality = 'high' | 'balanced' | 'performance'
+export type BlueprintRotation = 0 | 90 | 180 | 270
+export type BeltTier = 'keep' | 'belt' | 'fast-belt' | 'express-belt'
 
 export interface GridPosition {
   x: number
@@ -156,6 +159,7 @@ export interface BeltPreview {
   direction: Direction
   valid: boolean
   tool?: 'belt' | 'tunnel'
+  beltType?: 'belt' | 'fast-belt' | 'express-belt'
 }
 
 export interface AreaPreview {
@@ -212,6 +216,18 @@ export interface Blueprint {
   createdAt: string
 }
 
+export interface BlueprintPasteOptions {
+  rotation: BlueprintRotation
+  mirrorX: boolean
+  beltTier: BeltTier
+}
+
+export interface MapBookmark {
+  id: string
+  name: string
+  position: GridPosition
+}
+
 export interface ResearchRequirement {
   shape: ShapeId
   amount: number
@@ -243,6 +259,7 @@ export interface FactoryPerformance {
   fps: number
   frameTime: number
   quality: RenderQuality
+  simulationMode?: 'main' | 'worker'
 }
 
 export interface FactoryProject {
@@ -266,6 +283,7 @@ export interface FactoryProject {
   errors: FactoryError[]
   events: SimulationEvent[]
   blueprints: Blueprint[]
+  mapBookmarks: MapBookmark[]
   history: FactoryEntity[][]
 }
 

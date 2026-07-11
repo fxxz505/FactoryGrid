@@ -35,6 +35,7 @@ export const machineGeometry: Record<BuildingType, MachineGeometryStyle> = {
   'source-copper': { body: '#f0e7de', rim: '#704b35', accent: '#a66a3f', core: 'circle', scale: 0.9 },
   belt: { body: '#4a4b46', rim: '#262a28', accent: '#7a7a70', core: 'bars', scale: 1 },
   'fast-belt': { body: '#3f5654', rim: '#22312f', accent: '#6da69f', core: 'bars', scale: 1 },
+  'express-belt': { body: '#48535e', rim: '#283039', accent: '#d0b96d', core: 'bars', scale: 1 },
   splitter: { body: '#e4eee8', rim: '#405d54', accent: '#4fa186', core: 'split', scale: 0.96 },
   merger: { body: '#e4eee8', rim: '#405d54', accent: '#4fa186', core: 'merge', scale: 0.96 },
   tunnel: { body: '#e8ece9', rim: '#46545b', accent: '#7c8b92', core: 'pipe', scale: 0.96 },
