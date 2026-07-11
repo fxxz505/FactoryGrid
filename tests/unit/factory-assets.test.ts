@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { createShapezProject } from '../../src/data/examples'
-import { buildBeltLine } from '../../src/engine/simulation/editorActions'
+import { buildBeltLine, createPlacementEntity, placeBuilding } from '../../src/engine/simulation/editorActions'
 import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite } from '../../src/render/factoryAssets'
 import { buildings } from '../../src/data/machines'
 import type { FactoryEntity } from '../../src/models/factory'
-import { BELT_ITEM_RADIUS, beltPathPoint, resolveBeltInputDirection } from '../../src/render/canvasRenderer'
+import { BELT_ITEM_RADIUS, FACTORY_CHUNK_CELLS, beltPathPoint, factoryChunkKey, factoryChunkSignature, resolveBeltInputDirection } from '../../src/render/canvasRenderer'
 
 describe('factory geometric rendering contract', () => {
   it('maps every available machine to a local geometric style instead of image assets', () => {
@@ -25,6 +25,23 @@ describe('factory geometric rendering contract', () => {
     const corner = project.entities.find((entity) => entity.type === 'belt' && entity.position.x === 2 && entity.position.y === 0)
     expect(corner).toBeTruthy()
     expect(planBeltSprite(project, corner!).kind).toBe('corner')
+  })
+
+  it('keeps cached entity indexes consistent with direct topology lookup', () => {
+    let project = createShapezProject()
+    project.entities = []
+    project.belts = {}
+    project = buildBeltLine(project, { x: 0, y: 0 }, { x: 2, y: 1 }, 'east')
+
+    const corner = project.entities.find((entity) => entity.position.x === 2 && entity.position.y === 0)
+    const entityIndex = new Map(project.entities.map((entity) => [
+      `${entity.position.x},${entity.position.y}`,
+      entity
+    ]))
+
+    expect(corner).toBeTruthy()
+    expect(planBeltSprite(project, corner!, entityIndex)).toEqual(planBeltSprite(project, corner!))
+    expect(planBeltSprite(project, corner!, entityIndex).connections).toEqual(['south', 'west'])
   })
 
   it('only exposes real belt flow connections instead of every adjacent belt', () => {
@@ -95,6 +112,56 @@ describe('factory geometric rendering contract', () => {
     expect(BELT_ITEM_RADIUS).toBe(10.5)
   })
 
+  it('maps positive and negative world cells into stable 32x32 chunks', () => {
+    expect(FACTORY_CHUNK_CELLS).toBe(32)
+    expect(factoryChunkKey({ x: 0, y: 0 })).toBe('0:0')
+    expect(factoryChunkKey({ x: 31, y: 31 })).toBe('0:0')
+    expect(factoryChunkKey({ x: 32, y: 32 })).toBe('1:1')
+    expect(factoryChunkKey({ x: -1, y: -1 })).toBe('-1:-1')
+    expect(factoryChunkKey({ x: -32, y: -32 })).toBe('-1:-1')
+    expect(factoryChunkKey({ x: -33, y: -33 })).toBe('-2:-2')
+  })
+
+  it('invalidates only chunks affected by local topology changes', () => {
+    const project = createShapezProject()
+    project.entities = [
+      { id: 'local', kind: 'belt', type: 'belt', label: 'local', position: { x: 31, y: 4 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' },
+      { id: 'far', kind: 'processor', type: 'cutter', label: 'far', position: { x: 80, y: 80 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }
+    ]
+    const initial = factoryChunkSignature(project, 0, 0)
+
+    project.entities[1] = { ...project.entities[1], direction: 'south' }
+    expect(factoryChunkSignature(project, 0, 0)).toBe(initial)
+
+    project.entities.push({
+      id: 'neighbor',
+      kind: 'belt',
+      type: 'belt',
+      label: 'neighbor',
+      position: { x: 32, y: 4 },
+      direction: 'east',
+      input: [],
+      output: [],
+      progress: 0,
+      status: 'idle'
+    })
+    expect(factoryChunkSignature(project, 0, 0)).not.toBe(initial)
+  })
+  it('constructs machine previews through the same entity path as final placement', () => {
+    const position = { x: 100, y: 100 }
+    const previewable = buildings.filter((building) => !['belt', 'fast-belt', 'tunnel'].includes(building.id))
+
+    previewable.forEach((building) => {
+      const preview = createPlacementEntity(building.id, position, 'south')
+      const placedProject = placeBuilding(createShapezProject(), building.id, position, 'south')
+      const placed = placedProject.entities.find((entity) => (
+        entity.position.x === position.x && entity.position.y === position.y
+      ))
+
+      expect(placed).toBeTruthy()
+      expect({ ...placed, id: 'placement-preview' }).toEqual(preview)
+    })
+  })
   it('exposes furnace and assembler as multi-port machines with input and output roles', () => {
     const project = createShapezProject()
     const furnace: FactoryEntity = { id: 'furnace-test', kind: 'processor', type: 'furnace', label: 'furnace', position: { x: 0, y: 0 }, direction: 'east', input: [], output: [], progress: 0, status: 'idle' }

@@ -56,8 +56,12 @@ export function machineGeometryFor(type: BuildingType): MachineGeometryStyle {
   return machineGeometry[type]
 }
 
-export function planBeltSprite(project: FactoryProject, belt: FactoryEntity): BeltSpritePlan {
-  const connections = connectedDirections(project, belt)
+export function planBeltSprite(
+  project: FactoryProject,
+  belt: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): BeltSpritePlan {
+  const connections = connectedDirections(project, belt, entityIndex)
   const unique = normalizeConnections(connections.length > 0 ? connections : [belt.direction])
 
   if (unique.length >= 4) return { kind: 'cross', rotation: 0, connections: unique, direction: belt.direction }
@@ -79,12 +83,17 @@ export function machinePortRoles(entity: FactoryEntity): MachinePort[] {
   return machinePorts(entity)
 }
 
-export function connectedDirections(project: FactoryProject, entity: FactoryEntity): Direction[] {
+export function connectedDirections(
+  project: FactoryProject,
+  entity: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): Direction[] {
   const dirs = new Set<Direction>()
   dirs.add(entity.direction)
 
   directions().forEach((direction) => {
-    const neighbor = entityAt(project, offsetPosition(entity.position, direction))
+    const position = offsetPosition(entity.position, direction)
+    const neighbor = entityIndex?.get(positionKey(position)) ?? entityAt(project, position)
     if (!neighbor) return
 
     if (neighbor.type === 'splitter' && splitterPorts(neighbor.direction).includes(opposite(direction))) {
@@ -203,6 +212,10 @@ function pointsTo(entity: FactoryEntity, position: { x: number; y: number }): bo
 
 function entityAt(project: FactoryProject, position: { x: number; y: number }): FactoryEntity | undefined {
   return project.entities.find((entity) => entity.position.x === position.x && entity.position.y === position.y)
+}
+
+function positionKey(position: { x: number; y: number }): string {
+  return `${position.x},${position.y}`
 }
 
 function offsetPosition(position: { x: number; y: number }, direction: Direction): { x: number; y: number } {

@@ -52,7 +52,7 @@ test('machines use simple geometric language without text labels or image assets
   })
 
   await page.goto('/')
-  const canvas = page.getByTestId('factory-canvas')
+  const canvas = page.locator('.factory-canvas-static.active')
   await expect(canvas).toBeVisible()
   await expect(page.locator('.tool-row svg')).toHaveCount(5)
   await expect(page.locator('.machine-icon img')).toHaveCount(0)
@@ -159,7 +159,7 @@ test('R remains a rotate shortcut and is not assigned to a machine tool', async 
 })
 test('belt design uses pale guide marks without arrow-shaped blue markers', async ({ page }) => {
   await page.goto('/')
-  const canvas = page.getByTestId('factory-canvas')
+  const canvas = page.locator('.factory-canvas-static.active')
   const markerStats = await canvas.evaluate((node) => {
     const c = node as HTMLCanvasElement
     const ctx = c.getContext('2d')
@@ -183,7 +183,7 @@ test('belt design uses pale guide marks without arrow-shaped blue markers', asyn
 
 test('geometric canvas paints nonblank seamless belts and machines', async ({ page }) => {
   await page.goto('/')
-  const canvas = page.getByTestId('factory-canvas')
+  const canvas = page.locator('.factory-canvas-static.active')
   const painted = await canvas.evaluate((node) => {
     const c = node as HTMLCanvasElement
     const ctx = c.getContext('2d')
@@ -415,7 +415,9 @@ test('conveyor animation uses layered canvases without reactive per-frame update
   expect(canvas).toContain('factory-canvas-machine-overlay')
   expect(canvas).toContain('renderFactoryStaticCanvas')
   expect(canvas).toContain('renderFactoryDynamicCanvas')
-  expect(canvas).toContain('renderFactoryMachineOverlayCanvas(overlayCanvas, project, scene)')
+  expect(canvas).toContain('renderFactoryMachineOverlayCanvas(')
+  expect(canvas).toContain('chunkCache')
+  expect(canvas).toContain('chunkSnapshot')
   expect(canvas).toContain("document.visibilityState === 'hidden'")
   expect(renderer).toContain('export interface FactoryRenderScene')
   expect(renderer).toContain('beltPlans: Map<string, BeltSpritePlan>')
@@ -444,4 +446,607 @@ test('research is configured through a double-clickable research lab instead of 
   await expect(page.locator('.research-project-panel')).toBeVisible()
   await expect(page.locator('.research-project-choice')).toHaveCount(7)
   await expect(page.locator('.research-project-choice')).toContainText(['物流工程', '自动化升级', '冶金自动化', '高级电子学', '机器人技术', '自动化核心', '规模化生产'])
+})
+
+test('static world chunks are reused for previews and locally invalidated after building', async ({ page }) => {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & { __factoryChunkCanvases: number }
+    const originalCreateElement = Document.prototype.createElement
+    trackedWindow.__factoryChunkCanvases = 0
+    Document.prototype.createElement = function (tagName: string) {
+      const element = originalCreateElement.call(this, tagName)
+      if (tagName.toLowerCase() === 'canvas') trackedWindow.__factoryChunkCanvases += 1
+      return element
+    }
+  })
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.tool-row').filter({ hasText: '切割机' }).first().click()
+  await page.evaluate(() => { (window as typeof window & { __factoryChunkCanvases: number }).__factoryChunkCanvases = 0 })
+
+  for (const position of [{ x: 560, y: 230 }, { x: 610, y: 260 }, { x: 660, y: 290 }]) {
+    await canvas.hover({ position })
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  }
+  await page.keyboard.press('r')
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  expect(await page.evaluate(() => (window as typeof window & { __factoryChunkCanvases: number }).__factoryChunkCanvases)).toBe(0)
+
+  await canvas.click({ position: { x: 660, y: 290 } })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  const rebuiltAfterPlacement = await page.evaluate(() => (
+    window as typeof window & { __factoryChunkCanvases: number }
+  ).__factoryChunkCanvases)
+  expect(rebuiltAfterPlacement).toBeGreaterThan(0)
+  expect(rebuiltAfterPlacement).toBeLessThanOrEqual(6)
+
+  await canvas.hover({ position: { x: 680, y: 300 } })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  expect(await page.evaluate(() => (window as typeof window & { __factoryChunkCanvases: number }).__factoryChunkCanvases)).toBe(rebuiltAfterPlacement)
+})
+test('canvas panning streams covered viewports without per-event redraws or blank edges', async ({ page }) => {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & { __factoryStaticPaints: number }
+    const originalClearRect = CanvasRenderingContext2D.prototype.clearRect
+    trackedWindow.__factoryStaticPaints = 0
+    CanvasRenderingContext2D.prototype.clearRect = function (...args: [number, number, number, number]) {
+      if (this.canvas.classList.contains('factory-canvas-static')) trackedWindow.__factoryStaticPaints += 1
+      return originalClearRect.apply(this, args)
+    }
+  })
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  const layers = page.locator('.factory-render-layer.active')
+  await page.locator('.pan-tool').click()
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  await page.evaluate(() => { (window as typeof window & { __factoryStaticPaints: number }).__factoryStaticPaints = 0 })
+
+  await canvas.evaluate((node) => {
+    const rect = node.getBoundingClientRect()
+    const startX = rect.left + rect.width * 0.45
+    const startY = rect.top + rect.height * 0.45
+    node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1, clientX: startX, clientY: startY }))
+    for (let step = 1; step <= 64; step += 1) {
+      node.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: startX + step * 10,
+        clientY: startY + step * 6
+      }))
+    }
+  })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+
+  const streamedPaints = await page.evaluate(() => (
+    window as typeof window & { __factoryStaticPaints: number }
+  ).__factoryStaticPaints)
+  expect(streamedPaints).toBeGreaterThan(0)
+  expect(streamedPaints).toBeLessThanOrEqual(4)
+  const transforms = await layers.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).style.transform))
+  expect(new Set(transforms).size).toBe(1)
+  expect(transforms[0] === '' || /^translate3d\(/.test(transforms[0])).toBe(true)
+  const stageGrid = await page.locator('.factory-canvas-stage').evaluate((stage) => {
+    const style = getComputedStyle(stage)
+    return { image: style.backgroundImage, size: style.backgroundSize, position: style.backgroundPosition }
+  })
+  expect(stageGrid.image).toContain('linear-gradient')
+  expect(stageGrid.size).not.toBe('auto')
+
+  await canvas.evaluate((node) => {
+    const rect = node.getBoundingClientRect()
+    node.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      button: 0,
+      clientX: rect.left + rect.width * 0.45 + 640,
+      clientY: rect.top + rect.height * 0.45 + 384
+    }))
+  })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  expect(await layers.evaluateAll((nodes) => nodes.every((node) => !(node as HTMLElement).style.transform))).toBe(true)
+  expect(await page.evaluate(() => (
+    window as typeof window & { __factoryStaticPaints: number }
+  ).__factoryStaticPaints)).toBeGreaterThanOrEqual(streamedPaints)
+})
+
+test('panning streams newly visible chunks before mouse release without deleting belts', async ({ page }) => {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & { __factoryStaticPaints: number }
+    const originalClearRect = CanvasRenderingContext2D.prototype.clearRect
+    trackedWindow.__factoryStaticPaints = 0
+    CanvasRenderingContext2D.prototype.clearRect = function (...args: [number, number, number, number]) {
+      if (this.canvas.classList.contains('factory-canvas-static')) trackedWindow.__factoryStaticPaints += 1
+      return originalClearRect.apply(this, args)
+    }
+  })
+  await page.goto('/')
+
+  await page.locator('.run-controls button').nth(4).click()
+  const before = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ kind: string }>
+    }
+    return saved.entities?.filter((entity) => entity.kind === 'belt').length ?? 0
+  })
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.pan-tool').click()
+  await page.evaluate(() => { (window as typeof window & { __factoryStaticPaints: number }).__factoryStaticPaints = 0 })
+
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error('factory canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.55, box.y + box.height * 0.5)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.92, box.y + box.height * 0.82, { steps: 24 })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+
+  expect(await page.evaluate(() => (window as typeof window & { __factoryStaticPaints: number }).__factoryStaticPaints)).toBeGreaterThan(0)
+  expect(await page.locator('.factory-canvas-static.active').evaluate((node) => getComputedStyle(node).transform)).not.toBe('none')
+
+  await page.mouse.up()
+  await page.waitForFunction(() => (
+    Array.from(document.querySelectorAll('.factory-render-layer.active'))
+      .every((node) => !(node as HTMLElement).style.transform)
+  ))
+  const after = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ kind: string }>
+    }
+    return saved.entities?.filter((entity) => entity.kind === 'belt').length ?? 0
+  })
+  expect(after).toBe(before)
+  await expect(page.locator('.factory-canvas-stage > canvas')).toHaveCount(6)
+  expect(await page.locator('.factory-render-layer.active').evaluateAll((nodes) => (
+    nodes.every((node) => !(node as HTMLElement).style.transform)
+  ))).toBe(true)
+})
+test('mouse release keeps the first frame responsive and settles the camera while idle', async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & {
+      __releaseStaticPaints: number
+      __releaseStart: number
+      __releaseHandlerDuration: number
+      __releaseChunkCanvases: number
+      __releaseStores: number
+    }
+    state.__releaseStaticPaints = 0
+    state.__releaseStart = 0
+    state.__releaseHandlerDuration = 0
+    state.__releaseChunkCanvases = 0
+    state.__releaseStores = 0
+    const originalCreateElement = Document.prototype.createElement
+    Document.prototype.createElement = function (tagName: string) {
+      const element = originalCreateElement.call(this, tagName)
+      if (state.__releaseStart && tagName.toLowerCase() === 'canvas') state.__releaseChunkCanvases += 1
+      return element
+    }
+    const originalSetItem = Storage.prototype.setItem
+    Storage.prototype.setItem = function (...args: [string, string]) {
+      if (state.__releaseStart) state.__releaseStores += 1
+      return originalSetItem.apply(this, args)
+    }
+    const originalClearRect = CanvasRenderingContext2D.prototype.clearRect
+    CanvasRenderingContext2D.prototype.clearRect = function (...args: [number, number, number, number]) {
+      if (state.__releaseStart && this.canvas.classList.contains('factory-canvas-static')) {
+        state.__releaseStaticPaints += 1
+      }
+      return originalClearRect.apply(this, args)
+    }
+  })
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.pan-tool').click()
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __releaseStaticPaints: number
+      __releaseStart: number
+    }
+    state.__releaseStaticPaints = 0
+    state.__releaseStart = 0
+  })
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error('factory canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.42, box.y + box.height * 0.46)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.42 + 120, box.y + box.height * 0.46 + 60, { steps: 12 })
+  await canvas.evaluate((node) => {
+    const state = window as typeof window & {
+      __releaseStart: number
+      __releaseHandlerDuration: number
+    }
+    const rect = node.getBoundingClientRect()
+    state.__releaseStart = performance.now()
+    node.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      button: 0,
+      clientX: rect.left + rect.width * 0.42 + 120,
+      clientY: rect.top + rect.height * 0.46 + 60
+    }))
+    state.__releaseHandlerDuration = performance.now() - state.__releaseStart
+  })
+  const firstFrame = await page.evaluate(() => new Promise<{
+    handler: number
+    paints: number
+    chunks: number
+    stores: number
+  }>((resolve) => {
+    const state = window as typeof window & {
+      __releaseHandlerDuration: number
+      __releaseStaticPaints: number
+      __releaseChunkCanvases: number
+      __releaseStores: number
+    }
+    requestAnimationFrame(() => resolve({
+      handler: state.__releaseHandlerDuration,
+      paints: state.__releaseStaticPaints,
+      chunks: state.__releaseChunkCanvases,
+      stores: state.__releaseStores
+    }))
+  }))
+  expect(firstFrame.handler).toBeLessThan(4)
+  expect(firstFrame.paints).toBeLessThanOrEqual(1)
+  expect(firstFrame.chunks).toBe(0)
+  expect(firstFrame.stores).toBe(0)
+
+  await page.waitForFunction(() => (
+    Array.from(document.querySelectorAll('.factory-render-layer.active'))
+      .every((node) => !(node as HTMLElement).style.transform)
+  ))
+  expect(await page.evaluate(() => (
+    window as typeof window & { __releaseStaticPaints: number }
+  ).__releaseStaticPaints)).toBeLessThanOrEqual(1)
+})
+test('releasing the mouse over warmed chunks stays fast in a large factory', async ({ page }) => {
+  await page.addInitScript(() => {
+    const project = {
+      id: 'large-factory', name: 'large-factory', tick: 0, running: false, renderAlpha: 0, speed: 1,
+      activeTool: 'pan', activeDirection: 'east', viewport: { x: 130, y: 88, zoom: 1 }, goals: [],
+      unlocked: ['belt'], entities: [] as Array<Record<string, unknown>>, belts: {} as Record<string, object>,
+      metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 0, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+      research: { points: 0, delivered: {}, progress: {}, consumed: {}, completed: [], maxMachineLevel: 1 },
+      performance: { fps: 60, frameTime: 16.7, quality: 'high' }, errors: [], events: [], blueprints: [], history: []
+    }
+    for (let y = -30; y < 30; y += 1) {
+      for (let x = -50; x < 50; x += 1) {
+        const id = `large-belt-${x}-${y}`
+        project.entities.push({
+          id, kind: 'belt', type: 'belt', label: 'belt', position: { x, y }, direction: 'east',
+          input: [], output: [], progress: 0, status: 'idle'
+        })
+        project.belts[id] = {}
+      }
+    }
+    localStorage.setItem('factorygrid-shapez-v4', JSON.stringify(project))
+  })
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __largeChunkCanvases: number
+      __largeCommitStart: number
+      __largeCommitDuration: number
+    }
+    state.__largeChunkCanvases = 0
+    state.__largeCommitStart = 0
+    state.__largeCommitDuration = 0
+    const originalCreateElement = Document.prototype.createElement
+    Document.prototype.createElement = function (tagName: string) {
+      const element = originalCreateElement.call(this, tagName)
+      if (state.__largeCommitStart && tagName.toLowerCase() === 'canvas') state.__largeChunkCanvases += 1
+      return element
+    }
+    const layers = Array.from(document.querySelectorAll('.factory-render-layer.active'))
+    layers.forEach((layer) => {
+      new MutationObserver(() => {
+        if (!state.__largeCommitStart) return
+        if (layers.every((node) => !(node as HTMLElement).style.transform)) {
+          state.__largeCommitDuration = performance.now() - state.__largeCommitStart
+        }
+      }).observe(layer, { attributes: true, attributeFilter: ['style'] })
+    })
+  })
+
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error('factory canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.44, box.y + box.height * 0.48)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.44 + 90, box.y + box.height * 0.48 + 45, { steps: 10 })
+  await page.evaluate(() => {
+    (window as typeof window & { __largeCommitStart: number }).__largeCommitStart = performance.now()
+  })
+  await page.mouse.up()
+  await page.waitForFunction(() => (
+    (window as typeof window & { __largeCommitDuration: number }).__largeCommitDuration > 0
+  ))
+
+  const result = await page.evaluate(() => {
+    const state = window as typeof window & {
+      __largeChunkCanvases: number
+      __largeCommitDuration: number
+    }
+    return { chunks: state.__largeChunkCanvases, duration: state.__largeCommitDuration }
+  })
+  expect(result.chunks).toBe(0)
+  expect(result.duration).toBeLessThan(140)
+})
+
+test('streaming pan redraws cargo before clearing translated canvas layers', async ({ page }) => {
+  await page.goto('/')
+
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __dynamicPaintAfterStatic: boolean
+      __unsyncedPanClears: number
+    }
+    state.__dynamicPaintAfterStatic = true
+    state.__unsyncedPanClears = 0
+    const originalClearRect = CanvasRenderingContext2D.prototype.clearRect
+    CanvasRenderingContext2D.prototype.clearRect = function (...args: [number, number, number, number]) {
+      if (this.canvas.classList.contains('factory-canvas-static')) state.__dynamicPaintAfterStatic = false
+      if (this.canvas.classList.contains('factory-canvas-dynamic')
+        && !this.canvas.classList.contains('factory-canvas-machine-overlay')) {
+        state.__dynamicPaintAfterStatic = true
+      }
+      return originalClearRect.apply(this, args)
+    }
+    document.querySelectorAll('.factory-render-layer').forEach((canvas) => {
+      new MutationObserver(() => {
+        if (!(canvas as HTMLElement).style.transform && !state.__dynamicPaintAfterStatic) {
+          state.__unsyncedPanClears += 1
+        }
+      }).observe(canvas, { attributes: true, attributeFilter: ['style'] })
+    })
+  })
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.pan-tool').click()
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error('factory canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.45, box.y + box.height * 0.45)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.88, box.y + box.height * 0.78, { steps: 30 })
+  await page.mouse.up()
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+
+  expect(await page.evaluate(() => (
+    window as typeof window & { __unsyncedPanClears: number }
+  ).__unsyncedPanClears)).toBe(0)
+})
+test('mouse release keeps translated cargo animating before the idle camera commit', async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & {
+      __releaseDynamicPaints: number
+      __releaseStaticPaints: number
+      __captureReleasePaints: boolean
+      __releaseFrameTimes: number[]
+    }
+    state.__releaseDynamicPaints = 0
+    state.__releaseStaticPaints = 0
+    state.__captureReleasePaints = false
+    state.__releaseFrameTimes = []
+    const project = {
+      id: 'release-cargo-project', name: 'release-cargo-project', tick: 0, running: false, renderAlpha: 0, speed: 1,
+      activeTool: 'pan', activeDirection: 'east', viewport: { x: 130, y: 88, zoom: 1 }, goals: [], unlocked: ['belt'],
+      entities: [{
+        id: 'visible-belt', kind: 'belt', type: 'belt', label: 'belt', position: { x: 6, y: 5 }, direction: 'east',
+        input: [], output: [], progress: 0, status: 'idle'
+      }],
+      belts: {
+        'visible-belt': {
+          item: { id: 'release-cargo', shape: 'circle', age: 0 }, enteredTick: 0, lastMovedTick: 0
+        }
+      },
+      metrics: { delivered: {}, produced: {}, trashed: {}, beltItems: 1, activeBuildings: 0, bottlenecks: [], recentDelivery: [] },
+      research: { points: 0, delivered: {}, progress: {}, consumed: {}, completed: [], maxMachineLevel: 1 },
+      performance: { fps: 60, frameTime: 16.7, quality: 'high' }, errors: [], events: [], blueprints: [], history: []
+    }
+    localStorage.setItem('factorygrid-shapez-v4', JSON.stringify(project))
+    const originalClearRect = CanvasRenderingContext2D.prototype.clearRect
+    CanvasRenderingContext2D.prototype.clearRect = function (...args: [number, number, number, number]) {
+      if (state.__captureReleasePaints) {
+        if (this.canvas.classList.contains('factory-canvas-static')) state.__releaseStaticPaints += 1
+        else if (this.canvas.classList.contains('factory-canvas-dynamic')
+          && !this.canvas.classList.contains('factory-canvas-machine-overlay')) state.__releaseDynamicPaints += 1
+      }
+      return originalClearRect.apply(this, args)
+    }
+    const sampleFrame = (time: number) => {
+      if (state.__captureReleasePaints) state.__releaseFrameTimes.push(time)
+      requestAnimationFrame(sampleFrame)
+    }
+    requestAnimationFrame(sampleFrame)
+  })
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.pan-tool').click()
+  const box = await canvas.boundingBox()
+  if (!box) throw new Error('factory canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.46, box.y + box.height * 0.48)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.46 + 96, box.y + box.height * 0.48 + 44, { steps: 14 })
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __releaseDynamicPaints: number
+      __releaseStaticPaints: number
+      __captureReleasePaints: boolean
+      __releaseFrameTimes: number[]
+    }
+    state.__releaseDynamicPaints = 0
+    state.__releaseStaticPaints = 0
+    state.__releaseFrameTimes = []
+    state.__captureReleasePaints = true
+  })
+  await page.mouse.up()
+  const earlyFrames = await page.evaluate(() => new Promise<{
+    dynamicPaints: number
+    staticPaints: number
+    transformed: boolean
+  }>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
+    const state = window as typeof window & {
+      __releaseDynamicPaints: number
+      __releaseStaticPaints: number
+    }
+    resolve({
+      dynamicPaints: state.__releaseDynamicPaints,
+      staticPaints: state.__releaseStaticPaints,
+      transformed: Array.from(document.querySelectorAll('.factory-render-layer.active'))
+        .every((node) => Boolean((node as HTMLElement).style.transform))
+    })
+  }))))
+  expect(earlyFrames.dynamicPaints).toBeGreaterThanOrEqual(2)
+  expect(earlyFrames.staticPaints).toBe(0)
+  expect(earlyFrames.transformed).toBe(true)
+
+  await page.waitForFunction(() => (
+    Array.from(document.querySelectorAll('.factory-render-layer.active'))
+      .every((node) => !(node as HTMLElement).style.transform)
+  ))
+  await page.evaluate(() => {
+    const state = window as typeof window & { __captureReleasePaints: boolean; __releaseFrameTimes: number[] }
+    state.__captureReleasePaints = false
+    const gaps = state.__releaseFrameTimes.slice(1).map((time, index) => time - state.__releaseFrameTimes[index])
+    ;(window as typeof window & { __releaseMaxFrameGap: number }).__releaseMaxFrameGap = Math.max(0, ...gaps)
+  })
+  expect(await page.evaluate(() => (
+    window as typeof window & { __releaseMaxFrameGap: number }
+  ).__releaseMaxFrameGap)).toBeLessThan(34)
+})
+test('M opens a cached full factory map which can navigate the main camera', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.factory-minimap')).toHaveCount(0)
+  await page.keyboard.press('m')
+  const worldMap = page.locator('.world-map-overlay')
+  const mapCanvas = page.getByTestId('world-map-canvas')
+  await expect(worldMap).toBeVisible()
+  await expect(worldMap).toContainText('工厂地图')
+  await expect(mapCanvas).toBeVisible()
+
+  const before = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      viewport?: { x: number; y: number }
+    }
+    return saved.viewport
+  })
+
+  const pixels = await mapCanvas.evaluate((canvas) => {
+    const map = canvas as HTMLCanvasElement
+    const context = map.getContext('2d')
+    if (!context) return 0
+    return Array.from(context.getImageData(0, 0, map.width, map.height).data)
+      .filter((value, index) => index % 4 !== 3 && value > 0).length
+  })
+  expect(pixels).toBeGreaterThan(100)
+
+  await page.evaluate(() => {
+    const state = window as typeof window & { __mapCanvasCreations: number }
+    state.__mapCanvasCreations = 0
+    const originalCreateElement = Document.prototype.createElement
+    Document.prototype.createElement = function (tagName: string) {
+      const element = originalCreateElement.call(this, tagName)
+      if (tagName.toLowerCase() === 'canvas') state.__mapCanvasCreations += 1
+      return element
+    }
+  })
+  const box = await mapCanvas.boundingBox()
+  if (!box) throw new Error('world map canvas has no bounds')
+  await page.mouse.move(box.x + box.width * 0.52, box.y + box.height * 0.52)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 0.68, box.y + box.height * 0.62, { steps: 12 })
+  await page.mouse.up()
+  await page.mouse.wheel(0, -240)
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  expect(await page.evaluate(() => (
+    window as typeof window & { __mapCanvasCreations: number }
+  ).__mapCanvasCreations)).toBe(0)
+
+  await mapCanvas.dblclick({ position: { x: box.width * 0.72, y: box.height * 0.48 } })
+  await expect(worldMap).toHaveCount(0)
+  await page.waitForFunction(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      viewport?: { x: number; y: number }
+    }
+    return Boolean(saved.viewport && saved.viewport.x !== 130)
+  })
+  const after = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      viewport?: { x: number; y: number }
+    }
+    return saved.viewport
+  })
+  expect(after).toBeTruthy()
+  expect(after).not.toEqual(before)
+
+  await page.keyboard.press('m')
+  await expect(page.locator('.world-map-overlay')).toBeVisible()
+  await page.keyboard.press('m')
+  await expect(page.locator('.world-map-overlay')).toHaveCount(0)
+})
+
+test('world map derives belt corners and machine links from the factory topology', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/WorldMap.vue', 'utf8'))
+  const assets = await import('node:fs/promises').then((fs) => fs.readFile('src/render/factoryAssets.ts', 'utf8'))
+
+  expect(source).toContain('planBeltSprite(props.project, entity, entityIndex).connections')
+  expect(source).toContain('connections.forEach((direction) => drawConnectionArm')
+  expect(source).toContain('portConnectsToNeighbor')
+  expect(source).toContain('drawTunnelLinks')
+  expect(assets).toContain('entityIndex?.get(positionKey(position))')
+  expect(assets).not.toContain("entityIndex?.get(position.x + ':' + position.y)")
+})
+test('machine placement preview rotates and commits the same direction as the placed entity', async ({ page }) => {
+  await page.goto('/')
+
+  const canvas = page.getByTestId('factory-canvas')
+  await page.locator('.tool-row').filter({ hasText: '切割机' }).first().click()
+  await canvas.hover({ position: { x: 620, y: 260 } })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  const eastPreview = await canvas.screenshot()
+
+  await page.keyboard.press('r')
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  const southPreview = await canvas.screenshot()
+  expect(southPreview.equals(eastPreview)).toBe(false)
+
+  await canvas.click({ position: { x: 620, y: 260 } })
+  const placedDirection = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ type: string; direction: string }>
+    }
+    return saved.entities?.filter((entity) => entity.type === 'cutter').at(-1)?.direction
+  })
+  expect(placedDirection).toBe('south')
+
+  await page.keyboard.press('r')
+  await canvas.click({ position: { x: 620, y: 260 } })
+  const replacement = await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('factorygrid-shapez-v4') ?? '{}') as {
+      entities?: Array<{ type: string; direction: string; position: { x: number; y: number } }>
+    }
+    const cutters = saved.entities?.filter((entity) => entity.type === 'cutter') ?? []
+    const latest = cutters.at(-1)
+    return {
+      direction: latest?.direction,
+      occupants: latest
+        ? saved.entities?.filter((entity) => (
+          entity.position.x === latest.position.x && entity.position.y === latest.position.y
+        )).length
+        : 0
+    }
+  })
+  expect(replacement).toEqual({ direction: 'west', occupants: 1 })
+
+  const source = await import('node:fs/promises').then((fs) => fs.readFile('src/components/editor/FactoryCanvas.vue', 'utf8'))
+  const renderer = await import('node:fs/promises').then((fs) => fs.readFile('src/render/canvasRenderer.ts', 'utf8'))
+  const actions = await import('node:fs/promises').then((fs) => fs.readFile('src/engine/simulation/editorActions.ts', 'utf8'))
+  expect(source).toContain('placementPreview')
+  expect(renderer).toContain('drawPlacementPreview')
+  expect(renderer).toContain('drawMachineAsset(ctx, project, preview.entity')
+  expect(actions).toContain('createPlacementEntity')
 })

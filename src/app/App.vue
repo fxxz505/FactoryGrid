@@ -15,6 +15,7 @@
         <button type="button" @click="resetProject"><RefreshCw :size="16" />重置</button>
         <button type="button" @click="rotateTool"><RotateCw :size="16" />旋转 {{ arrowFor(project.activeDirection) }}</button>
         <button type="button" @click="centerViewport"><Focus :size="16" />回到工厂</button>
+        <button type="button" @click="openWorldMap"><Map :size="16" />地图 M</button>
         <button type="button" @click="undoProject"><Undo2 :size="16" />撤销</button>
       </div>
 
@@ -144,16 +145,25 @@
         <button class="wide-action" type="button" @click="closeResearchPanel">关闭</button>
       </section>
     </div>
+
+    <WorldMap
+      v-if="worldMapOpen"
+      :project="project"
+      :viewport-size="factoryViewportSize"
+      @close="closeWorldMap"
+      @viewport-change="handleViewportChange"
+    />
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, toRaw } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, toRaw } from 'vue'
 import {
-  ChevronsUp, ClipboardPaste, Copy, Focus, Move, Pause, Play,
+  ChevronsUp, ClipboardPaste, Copy, Focus, Map, Move, Pause, Play,
   RefreshCw, RotateCw, StepForward, Trash2, Undo2
 } from '@lucide/vue'
 import FactoryCanvas from '../components/editor/FactoryCanvas.vue'
+import WorldMap from '../components/editor/WorldMap.vue'
 import SimulationBar from '../components/editor/SimulationBar.vue'
 import MachineIcon from '../components/editor/MachineIcon.vue'
 import { buildings, buildingById } from '../data/machines'
@@ -178,6 +188,8 @@ const SIMULATION_STEP_MS = 170
 const project = reactive(loadProject())
 const recipePanel = reactive<{ entityId?: string }>({})
 const researchPanel = reactive<{ entityId?: string }>({})
+const worldMapOpen = ref(false)
+const factoryViewportSize = reactive({ width: 960, height: 640 })
 const blueprintState = reactive<{ activeId?: string }>({})
 let frameHandle = 0
 let lastFrameTime = 0
@@ -265,13 +277,10 @@ function saveProject(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(project))
 }
 
-function scheduleSaveProject(): void {
+function scheduleSaveProject(minimumDelay = 0): void {
   const elapsed = Date.now() - lastSavedAt
-  if (elapsed >= SAVE_THROTTLE_MS) {
-    saveProject()
-    return
-  }
-  if (!saveTimer) saveTimer = window.setTimeout(saveProject, SAVE_THROTTLE_MS - elapsed)
+  const delay = Math.max(minimumDelay, elapsed >= SAVE_THROTTLE_MS ? 0 : SAVE_THROTTLE_MS - elapsed)
+  if (!saveTimer) saveTimer = window.setTimeout(saveProject, delay)
 }
 
 function selectTool(tool: ToolId): void {
@@ -294,11 +303,23 @@ function centerViewport(): void {
   project.viewport = { x: 150, y: 88, zoom: 1 }
   saveProject()
 }
+function measureFactoryViewport(): void {
+  const stage = document.querySelector<HTMLElement>('.factory-canvas-stage')
+  if (!stage) return
+  factoryViewportSize.width = stage.clientWidth
+  factoryViewportSize.height = stage.clientHeight
+}
+function openWorldMap(): void {
+  measureFactoryViewport()
+  worldMapOpen.value = true
+}
+function closeWorldMap(): void { worldMapOpen.value = false }
 function rotateTool(): void {
-  if (project.selectedEntityId) replaceProject(rotateSelectedEntity(project))
-  else {
+  if (buildings.some((building) => building.id === project.activeTool)) {
     project.activeDirection = rotateDirection(project.activeDirection)
     saveProject()
+  } else if (project.activeTool === 'select' && project.selectedEntityId) {
+    replaceProject(rotateSelectedEntity(project))
   }
 }
 function undoProject(): void { replaceProject(undo(project)) }
@@ -339,7 +360,7 @@ function handleAreaAction(start: GridPosition, end: GridPosition): void {
 function handleDeleteCell(cell: GridPosition): void { replaceProject(deleteAt(project, cell)) }
 function handleViewportChange(viewport: ViewportState): void {
   project.viewport = viewport
-  scheduleSaveProject()
+  scheduleSaveProject(250)
 }
 function chooseBlueprint(blueprint: Blueprint): void {
   if (!blueprint.entities.length) return
@@ -410,6 +431,17 @@ function arrowFor(direction: string): string {
 function onKey(event: KeyboardEvent): void {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
   const key = event.key.toLowerCase()
+  if (key === 'm') {
+    event.preventDefault()
+    if (worldMapOpen.value) closeWorldMap()
+    else openWorldMap()
+    return
+  }
+  if (key === 'escape' && worldMapOpen.value) {
+    closeWorldMap()
+    return
+  }
+  if (worldMapOpen.value) return
   const match = visibleBuildings.value.find((building) => building.hotkey.toLowerCase() === key)
   if (match) selectTool(match.id)
   if (key === 'r') rotateTool()

@@ -111,13 +111,36 @@ button { cursor: pointer; }
 .canvas-legend { flex: 0 0 auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .canvas-legend i { width: 8px; height: 8px; display: inline-block; border-radius: 999px; margin-right: 5px; }
 .canvas-legend .ok { background: #16857a; } .canvas-legend .warn { background: #b58a2a; } .canvas-legend .bad { background: #e05252; }
-.factory-canvas-stage { position: relative; min-height: 0; overflow: hidden; }
+.factory-canvas-stage {
+  --factory-grid-size: 46px;
+  --factory-grid-x: 0px;
+  --factory-grid-y: 0px;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background-color: #e7e6dc;
+  background-image:
+    linear-gradient(to right, rgba(39, 52, 58, 0.16) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(39, 52, 58, 0.16) 1px, transparent 1px),
+    linear-gradient(135deg, #edf0e9 0%, #e7e1d3 54%, #dce6e3 100%);
+  background-position:
+    var(--factory-grid-x) var(--factory-grid-y),
+    var(--factory-grid-x) var(--factory-grid-y),
+    0 0;
+  background-size:
+    var(--factory-grid-size) var(--factory-grid-size),
+    var(--factory-grid-size) var(--factory-grid-size),
+    100% 100%;
+}
 .factory-canvas, .factory-canvas-dynamic { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.factory-render-layer { visibility: hidden; }
+.factory-render-layer.active { visibility: visible; }
+.factory-canvas-input { z-index: 4; background: transparent; }
+.factory-canvas-stage.is-panning canvas { will-change: transform; }
 .factory-canvas { cursor: crosshair; touch-action: none; }
 .factory-canvas-dynamic { pointer-events: none; }
 .factory-canvas.panning { cursor: grabbing; }
 .factory-canvas.previewing { cursor: copy; }
-
 .simulation-bar { display: grid; grid-template-columns: 90px 90px 80px 220px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 12px; }
 .simulation-bar strong { display: block; color: #647278; font-size: 11px; text-transform: uppercase; }
 .simulation-bar span { display: block; overflow: hidden; color: #26343b; font-size: 14px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
@@ -234,3 +257,66 @@ button { cursor: pointer; }
 .research-progress-text { color: #16857a !important; font-weight: 900; }
 .machine-icon.research-lab .icon-plate { background: #e9e5f0; color: #5e536c; }
 .machine-icon.research-lab .icon-core { width: 20px; height: 20px; border: 4px solid #8d72aa; border-radius: 50%; background: transparent; }
+
+.world-map-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-rows: 54px minmax(0, 1fr);
+  background: #424b5b;
+}
+.world-map-toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.16);
+  background: #333c49;
+  color: #eef3f1;
+}
+.world-map-toolbar > div:first-child { min-width: 0; display: flex; align-items: baseline; gap: 12px; }
+.world-map-toolbar strong { font-size: 15px; }
+.world-map-toolbar span { overflow: hidden; color: #aeb9bc; font-size: 12px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.world-map-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.world-map-actions button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 6px;
+  background: #46515f;
+  color: #edf2f0;
+}
+.world-map-actions button:hover { border-color: #f2d36d; background: #53606f; color: #f7d45c; }
+.world-map-stage { position: relative; min-height: 0; overflow: hidden; }
+.world-map-stage canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+.world-map-stage canvas:active { cursor: grabbing; }
+.world-map-hint {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 6px;
+  background: rgba(42,49,59,0.86);
+  color: #cdd7d7;
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+}
+.world-map-hint kbd { padding: 2px 6px; border: 1px solid rgba(255,255,255,0.22); border-radius: 4px; background: #596575; color: #ffffff; font: inherit; }
+
+@media (max-width: 620px) {
+  .world-map-overlay { grid-template-rows: auto minmax(0, 1fr); }
+  .world-map-toolbar { align-items: flex-start; }
+  .world-map-toolbar > div:first-child { display: block; }
+  .world-map-toolbar span { display: block; margin-top: 3px; white-space: normal; }
+}

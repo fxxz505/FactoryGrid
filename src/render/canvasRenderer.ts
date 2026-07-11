@@ -4,6 +4,10 @@ import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planB
 
 export const CELL = 46
 export const BELT_ITEM_RADIUS = 10.5
+export const FACTORY_CHUNK_CELLS = 32
+const FACTORY_STATIC_CHUNK_CACHE_LIMIT = 18
+const FACTORY_OVERLAY_CHUNK_CACHE_LIMIT = 12
+const FACTORY_CHUNK_PREFETCH_RING = 1
 const INPUT_PORT_COLOR = '#86bd73'
 const OUTPUT_PORT_COLOR = '#6fa9c8'
 export const DEFAULT_VIEWPORT: ViewportState = { x: 130, y: 88, zoom: 1 }
@@ -13,8 +17,159 @@ export interface CanvasSelection {
   hoverCell?: GridPosition
   preview?: BeltPreview
   areaPreview?: AreaPreview
+  placementPreview?: PlacementPreview
 }
 
+export interface PlacementPreview {
+  entity: FactoryEntity
+  replacing: boolean
+}
+
+export interface FactoryChunkSnapshot {
+  entities: Map<string, FactoryEntity[]>
+  signatures: Map<string, string>
+  entityIndex: Map<string, FactoryEntity>
+}
+
+interface FactoryChunkCacheEntry {
+  canvas: HTMLCanvasElement
+  signature: string
+  zoom: number
+  ratio: number
+  padding: number
+}
+
+export interface FactoryChunkRenderCache {
+  staticChunks: Map<string, FactoryChunkCacheEntry>
+  overlayChunks: Map<string, FactoryChunkCacheEntry>
+  stats: {
+    hits: number
+    misses: number
+    evictions: number
+  }
+}
+
+export function createFactoryChunkRenderCache(): FactoryChunkRenderCache {
+  return {
+    staticChunks: new Map(),
+    overlayChunks: new Map(),
+    stats: { hits: 0, misses: 0, evictions: 0 }
+  }
+}
+
+export function clearFactoryChunkRenderCache(cache: FactoryChunkRenderCache): void {
+  cache.staticChunks.clear()
+  cache.overlayChunks.clear()
+}
+
+export function areVisibleFactoryChunksCached(
+  cache: FactoryChunkRenderCache,
+  snapshot: FactoryChunkSnapshot,
+  viewport: ViewportState,
+  width: number,
+  height: number
+): boolean {
+  const bounds = visibleChunkBounds(width, height, viewport)
+  for (let chunkY = bounds.minY; chunkY <= bounds.maxY; chunkY += 1) {
+    for (let chunkX = bounds.minX; chunkX <= bounds.maxX; chunkX += 1) {
+      const key = chunkX + ':' + chunkY
+      if (!snapshot.entities.get(key)?.length) continue
+      const signature = snapshot.signatures.get(key) ?? ''
+      if (cache.staticChunks.get(key)?.signature !== signature) return false
+      if (snapshot.entities.get(key)?.some((entity) => entity.kind !== 'belt')
+        && cache.overlayChunks.get(key)?.signature !== signature) return false
+    }
+  }
+  return true
+}
+
+export function prewarmFactoryChunks(
+  cache: FactoryChunkRenderCache,
+  snapshot: FactoryChunkSnapshot,
+  project: FactoryProject,
+  viewport: ViewportState,
+  width: number,
+  height: number
+): number {
+  const visible = visibleChunkBounds(width, height, viewport)
+  const bounds = {
+    minX: visible.minX - FACTORY_CHUNK_PREFETCH_RING,
+    maxX: visible.maxX + FACTORY_CHUNK_PREFETCH_RING,
+    minY: visible.minY - FACTORY_CHUNK_PREFETCH_RING,
+    maxY: visible.maxY + FACTORY_CHUNK_PREFETCH_RING
+  }
+
+  for (let chunkY = bounds.minY; chunkY <= bounds.maxY; chunkY += 1) {
+    for (let chunkX = bounds.minX; chunkX <= bounds.maxX; chunkX += 1) {
+      const key = chunkX + ':' + chunkY
+      const entities = snapshot.entities.get(key)
+      if (!entities?.length) continue
+      const signature = snapshot.signatures.get(key) ?? ''
+      if (cache.staticChunks.get(key)?.signature !== signature) {
+        getFactoryChunk(cache.staticChunks, cache, key, signature, project, entities, chunkX, chunkY, 'static')
+        return 1
+      }
+      if (entities.some((entity) => entity.kind !== 'belt')
+        && cache.overlayChunks.get(key)?.signature !== signature) {
+        getFactoryChunk(cache.overlayChunks, cache, key, signature, project, entities, chunkX, chunkY, 'overlay')
+        return 1
+      }
+    }
+  }
+  return 0
+}
+
+export function factoryChunkKey(position: GridPosition): string {
+  return chunkCoordinate(position.x) + ':' + chunkCoordinate(position.y)
+}
+
+export function factoryChunkSignature(project: FactoryProject, chunkX: number, chunkY: number): string {
+  const minX = chunkX * FACTORY_CHUNK_CELLS - 1
+  const maxX = (chunkX + 1) * FACTORY_CHUNK_CELLS
+  const minY = chunkY * FACTORY_CHUNK_CELLS - 1
+  const maxY = (chunkY + 1) * FACTORY_CHUNK_CELLS
+  return project.entities
+    .filter((entity) => (
+      entity.position.x >= minX && entity.position.x <= maxX
+      && entity.position.y >= minY && entity.position.y <= maxY
+    ))
+    .map(entityVisualSignature)
+    .join('|')
+}
+
+export function createFactoryChunkSnapshot(project: FactoryProject): FactoryChunkSnapshot {
+  const entities = new Map<string, FactoryEntity[]>()
+  const signatureParts = new Map<string, string[]>()
+  const entityIndex = new Map<string, FactoryEntity>()
+
+  project.entities.forEach((entity) => {
+    entityIndex.set(positionKey(entity.position), entity)
+    const ownKey = factoryChunkKey(entity.position)
+    const ownEntities = entities.get(ownKey)
+    if (ownEntities) ownEntities.push(entity)
+    else entities.set(ownKey, [entity])
+
+    const minChunkX = chunkCoordinate(entity.position.x - 1)
+    const maxChunkX = chunkCoordinate(entity.position.x + 1)
+    const minChunkY = chunkCoordinate(entity.position.y - 1)
+    const maxChunkY = chunkCoordinate(entity.position.y + 1)
+    const signature = entityVisualSignature(entity)
+    for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
+      for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+        const key = chunkX + ':' + chunkY
+        const parts = signatureParts.get(key)
+        if (parts) parts.push(signature)
+        else signatureParts.set(key, [signature])
+      }
+    }
+  })
+
+  return {
+    entities,
+    signatures: new Map(Array.from(signatureParts, ([key, parts]) => [key, parts.join('|')])),
+    entityIndex
+  }
+}
 
 export function gridToScreen(position: GridPosition, viewport: ViewportState = DEFAULT_VIEWPORT): { x: number; y: number } {
   return {
@@ -44,60 +199,296 @@ export interface FactoryRenderScene {
   beltInputs: Map<string, Direction>
 }
 
-export function createFactoryRenderScene(canvas: HTMLCanvasElement, project: FactoryProject): FactoryRenderScene {
+export function createFactoryRenderScene(
+  canvas: HTMLCanvasElement,
+  project: FactoryProject,
+  snapshot?: FactoryChunkSnapshot,
+  overscanCells = 1
+): FactoryRenderScene {
   const viewport = project.viewport ?? DEFAULT_VIEWPORT
-  const visible = visibleEntities(project, canvas.clientWidth, canvas.clientHeight, viewport)
+  const visible = snapshot
+    ? visibleEntitiesFromChunks(snapshot, canvas.clientWidth, canvas.clientHeight, viewport, overscanCells)
+    : visibleEntities(project, canvas.clientWidth, canvas.clientHeight, viewport, overscanCells)
   const belts = visible.filter((entity) => entity.kind === 'belt')
-  const entityIndex = new Map(project.entities.map((entity) => [positionKey(entity.position), entity]))
-  const beltPlans = new Map(belts.map((entity) => [entity.id, planBeltSprite(project, entity)]))
+  const entityIndex = snapshot?.entityIndex ?? new Map(project.entities.map((entity) => [positionKey(entity.position), entity]))
+  const beltPlans = new Map(belts.map((entity) => [entity.id, planBeltSprite(project, entity, entityIndex)]))
   const beltInputs = new Map(belts.map((entity) => [entity.id, beltInputDirection(project, entity, entityIndex)]))
   return { visible, belts, visibleIds: new Set(visible.map((entity) => entity.id)), entityIndex, beltPlans, beltInputs }
+}
+
+function visibleEntitiesFromChunks(
+  snapshot: FactoryChunkSnapshot,
+  width: number,
+  height: number,
+  viewport: ViewportState,
+  overscanCells: number
+): FactoryEntity[] {
+  const grid = visibleGridBounds(width, height, viewport, overscanCells)
+  const chunks = visibleChunkBounds(width, height, viewport)
+  const visible: FactoryEntity[] = []
+  for (let chunkY = chunks.minY; chunkY <= chunks.maxY; chunkY += 1) {
+    for (let chunkX = chunks.minX; chunkX <= chunks.maxX; chunkX += 1) {
+      const entities = snapshot.entities.get(chunkX + ':' + chunkY)
+      if (!entities) continue
+      entities.forEach((entity) => {
+        if (entity.position.x >= grid.minX && entity.position.x <= grid.maxX
+          && entity.position.y >= grid.minY && entity.position.y <= grid.maxY) visible.push(entity)
+      })
+    }
+  }
+  return visible
 }
 
 export function renderFactoryStaticCanvas(
   canvas: HTMLCanvasElement,
   project: FactoryProject,
   selection: CanvasSelection,
-  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project),
+  chunkCache?: FactoryChunkRenderCache,
+  chunkSnapshot: FactoryChunkSnapshot = createFactoryChunkSnapshot(project)
 ): void {
   const ctx = prepareCanvas(canvas, project)
   if (!ctx) return
   const viewport = project.viewport ?? DEFAULT_VIEWPORT
   ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
   drawGrid(ctx, canvas.clientWidth, canvas.clientHeight, viewport, selection.hoverCell)
-  drawTunnelLinks(ctx, project, viewport, scene.visibleIds)
+  drawTunnelLinks(ctx, project, viewport, scene.visibleIds, scene.entityIndex, scene.visible)
+  if (chunkCache) {
+    drawCachedFactoryChunks(ctx, project, viewport, canvas.clientWidth, canvas.clientHeight, chunkCache, chunkSnapshot, 'static')
+    drawSelectedEntity(ctx, scene, selection.selectedEntityId, viewport)
+  } else {
+    scene.belts.forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
+    scene.visible
+      .filter((entity) => entity.kind !== 'belt')
+      .forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
+  }
   if (selection.preview) drawBeltPreview(ctx, viewport, selection.preview)
   if (selection.areaPreview) drawAreaPreview(ctx, viewport, selection.areaPreview)
-  scene.belts.forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
-  scene.visible
-    .filter((entity) => entity.kind !== 'belt')
-    .forEach((entity) => drawEntity(ctx, project, entity, selection.selectedEntityId === entity.id, viewport, scene))
 }
 
 export function renderFactoryDynamicCanvas(
   canvas: HTMLCanvasElement,
   project: FactoryProject,
   renderAlpha: number,
-  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project),
+  viewport: ViewportState = project.viewport ?? DEFAULT_VIEWPORT
 ): void {
   const ctx = prepareCanvas(canvas, project)
   if (!ctx) return
   ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
-  renderDynamicItems(ctx, project, renderAlpha, scene)
+  renderDynamicItems(ctx, project, renderAlpha, scene, viewport)
 }
 
 export function renderFactoryMachineOverlayCanvas(
   canvas: HTMLCanvasElement,
   project: FactoryProject,
-  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project)
+  scene: FactoryRenderScene = createFactoryRenderScene(canvas, project),
+  placementPreview?: PlacementPreview,
+  chunkCache?: FactoryChunkRenderCache,
+  chunkSnapshot: FactoryChunkSnapshot = createFactoryChunkSnapshot(project)
 ): void {
   const ctx = prepareCanvas(canvas, project)
   if (!ctx) return
   const viewport = project.viewport ?? DEFAULT_VIEWPORT
   ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
-  scene.visible
-    .filter((entity) => entity.kind !== 'belt')
-    .forEach((entity) => drawMachineOccluder(ctx, entity, viewport))
+  if (chunkCache) {
+    drawCachedFactoryChunks(ctx, project, viewport, canvas.clientWidth, canvas.clientHeight, chunkCache, chunkSnapshot, 'overlay')
+  } else {
+    scene.visible
+      .filter((entity) => entity.kind !== 'belt')
+      .forEach((entity) => drawMachineOccluder(ctx, entity, viewport))
+  }
+  if (placementPreview) drawPlacementPreview(ctx, project, placementPreview, viewport)
+}
+
+function drawCachedFactoryChunks(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  viewport: ViewportState,
+  width: number,
+  height: number,
+  cache: FactoryChunkRenderCache,
+  snapshot: FactoryChunkSnapshot,
+  layer: 'static' | 'overlay'
+): void {
+  const bounds = visibleChunkBounds(width, height, viewport)
+  const targetCache = layer === 'static' ? cache.staticChunks : cache.overlayChunks
+  const chunkSize = FACTORY_CHUNK_CELLS * CELL * viewport.zoom
+
+  for (let chunkY = bounds.minY; chunkY <= bounds.maxY; chunkY += 1) {
+    for (let chunkX = bounds.minX; chunkX <= bounds.maxX; chunkX += 1) {
+      const key = chunkX + ':' + chunkY
+      const entities = snapshot.entities.get(key)
+      if (!entities?.length) continue
+      if (layer === 'overlay' && !entities.some((entity) => entity.kind !== 'belt')) continue
+      const entry = getFactoryChunk(
+        targetCache,
+        cache,
+        key,
+        snapshot.signatures.get(key) ?? '',
+        project,
+        entities,
+        chunkX,
+        chunkY,
+        layer
+      )
+      const screen = gridToScreen(
+        { x: chunkX * FACTORY_CHUNK_CELLS, y: chunkY * FACTORY_CHUNK_CELLS },
+        viewport
+      )
+      ctx.drawImage(
+        entry.canvas,
+        screen.x - entry.padding * viewport.zoom,
+        screen.y - entry.padding * viewport.zoom,
+        chunkSize + entry.padding * viewport.zoom * 2,
+        chunkSize + entry.padding * viewport.zoom * 2
+      )
+    }
+  }
+}
+
+function getFactoryChunk(
+  targetCache: Map<string, FactoryChunkCacheEntry>,
+  cache: FactoryChunkRenderCache,
+  key: string,
+  signature: string,
+  project: FactoryProject,
+  entities: FactoryEntity[],
+  chunkX: number,
+  chunkY: number,
+  layer: 'static' | 'overlay'
+): FactoryChunkCacheEntry {
+  const ratio = 1
+  const existing = targetCache.get(key)
+  if (existing && existing.signature === signature && existing.ratio === ratio) {
+    targetCache.delete(key)
+    targetCache.set(key, existing)
+    cache.stats.hits += 1
+    return existing
+  }
+
+  const entry = renderFactoryChunk(project, entities, chunkX, chunkY, signature, ratio, layer)
+  targetCache.delete(key)
+  targetCache.set(key, entry)
+  cache.stats.misses += 1
+  trimFactoryChunkCache(targetCache, cache)
+  return entry
+}
+
+function renderFactoryChunk(
+  project: FactoryProject,
+  entities: FactoryEntity[],
+  chunkX: number,
+  chunkY: number,
+  signature: string,
+  ratio: number,
+  layer: 'static' | 'overlay'
+): FactoryChunkCacheEntry {
+  const zoom = 1
+  const chunkSize = FACTORY_CHUNK_CELLS * CELL
+  const padding = 12
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.ceil((chunkSize + padding * 2) * ratio)
+  canvas.height = Math.ceil((chunkSize + padding * 2) * ratio)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return { canvas, signature, zoom, ratio, padding }
+
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
+  const localViewport: ViewportState = {
+    x: padding - chunkX * FACTORY_CHUNK_CELLS * CELL * zoom,
+    y: padding - chunkY * FACTORY_CHUNK_CELLS * CELL * zoom,
+    zoom
+  }
+  if (layer === 'static') {
+    const belts = entities.filter((entity) => entity.kind === 'belt')
+    const machines = entities.filter((entity) => entity.kind !== 'belt')
+    belts.forEach((entity) => drawEntity(ctx, project, entity, false, localViewport))
+    machines.forEach((entity) => drawEntity(ctx, project, entity, false, localViewport))
+  } else {
+    entities
+      .filter((entity) => entity.kind !== 'belt')
+      .forEach((entity) => drawMachineOccluder(ctx, entity, localViewport))
+  }
+  return { canvas, signature, zoom, ratio, padding }
+}
+
+function drawSelectedEntity(
+  ctx: CanvasRenderingContext2D,
+  scene: FactoryRenderScene,
+  selectedEntityId: string | undefined,
+  viewport: ViewportState
+): void {
+  if (!selectedEntityId) return
+  const entity = scene.entityIndex.get(selectedEntityId)
+  if (!entity || !scene.visibleIds.has(entity.id)) return
+  const screen = gridToScreen(entity.position, viewport)
+  const scale = viewport.zoom
+  const size = CELL * scale
+  ctx.save()
+  ctx.strokeStyle = '#15796f'
+  ctx.lineWidth = 3 * scale
+  ctx.strokeRect(screen.x + 2 * scale, screen.y + 2 * scale, size - 4 * scale, size - 4 * scale)
+  ctx.restore()
+}
+
+function visibleChunkBounds(width: number, height: number, viewport: ViewportState): { minX: number; maxX: number; minY: number; maxY: number } {
+  const grid = visibleGridBounds(width, height, viewport)
+  return {
+    minX: chunkCoordinate(grid.minX),
+    maxX: chunkCoordinate(grid.maxX),
+    minY: chunkCoordinate(grid.minY),
+    maxY: chunkCoordinate(grid.maxY)
+  }
+}
+
+function trimFactoryChunkCache(targetCache: Map<string, FactoryChunkCacheEntry>, cache: FactoryChunkRenderCache): void {
+  const limit = targetCache === cache.staticChunks
+    ? FACTORY_STATIC_CHUNK_CACHE_LIMIT
+    : FACTORY_OVERLAY_CHUNK_CACHE_LIMIT
+  while (targetCache.size > limit) {
+    const oldest = targetCache.keys().next().value
+    if (oldest === undefined) return
+    targetCache.delete(oldest)
+    cache.stats.evictions += 1
+  }
+}
+
+function chunkCoordinate(value: number): number {
+  return Math.floor(value / FACTORY_CHUNK_CELLS)
+}
+
+function entityVisualSignature(entity: FactoryEntity): string {
+  return [
+    entity.type,
+    entity.position.x,
+    entity.position.y,
+    entity.direction,
+    entity.level ?? 1
+  ].join(':')
+}
+
+function drawPlacementPreview(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  preview: PlacementPreview,
+  viewport: ViewportState
+): void {
+  const screen = gridToScreen(preview.entity.position, viewport)
+  const size = CELL * viewport.zoom
+  ctx.save()
+  ctx.globalAlpha = 0.68
+  drawMachineAsset(ctx, project, preview.entity, screen.x, screen.y, size, viewport.zoom)
+  ctx.globalAlpha = 1
+  ctx.strokeStyle = preview.replacing ? 'rgba(181, 138, 42, 0.92)' : 'rgba(23, 128, 112, 0.88)'
+  ctx.lineWidth = Math.max(2, 2 * viewport.zoom)
+  ctx.setLineDash([6 * viewport.zoom, 4 * viewport.zoom])
+  ctx.strokeRect(
+    screen.x + 2 * viewport.zoom,
+    screen.y + 2 * viewport.zoom,
+    size - 4 * viewport.zoom,
+    size - 4 * viewport.zoom
+  )
+  ctx.restore()
 }
 
 function drawMachineOccluder(ctx: CanvasRenderingContext2D, entity: FactoryEntity, viewport: ViewportState): void {
@@ -130,8 +521,7 @@ export function renderFactoryCanvas(canvas: HTMLCanvasElement, project: FactoryP
 function prepareCanvas(canvas: HTMLCanvasElement, project: FactoryProject): CanvasRenderingContext2D | undefined {
   const ctx = canvas.getContext('2d') ?? undefined
   if (!ctx) return undefined
-  const ratioCap = project.performance?.quality === 'performance' ? 1.25 : 2
-  const ratio = Math.min(window.devicePixelRatio || 1, ratioCap)
+  const ratio = renderPixelRatio(project)
   const width = Math.round(canvas.clientWidth * ratio)
   const height = Math.round(canvas.clientHeight * ratio)
   if (canvas.width !== width || canvas.height !== height) {
@@ -142,13 +532,18 @@ function prepareCanvas(canvas: HTMLCanvasElement, project: FactoryProject): Canv
   return ctx
 }
 
+function renderPixelRatio(project: FactoryProject): number {
+  const ratioCap = project.performance?.quality === 'performance' ? 1.25 : 2
+  return Math.min(window.devicePixelRatio || 1, ratioCap)
+}
+
 function renderDynamicItems(
   ctx: CanvasRenderingContext2D,
   project: FactoryProject,
   renderAlpha: number,
-  scene: FactoryRenderScene
+  scene: FactoryRenderScene,
+  viewport: ViewportState = project.viewport ?? DEFAULT_VIEWPORT
 ): void {
-  const viewport = project.viewport ?? DEFAULT_VIEWPORT
   const radius = BELT_ITEM_RADIUS * viewport.zoom
   const groups = new Map<ShapeId, Array<{ x: number; y: number }>>()
 
@@ -256,18 +651,29 @@ function appendStarPath(ctx: CanvasRenderingContext2D, x: number, y: number, rad
   }
   ctx.closePath()
 }
-function visibleGridBounds(width: number, height: number, viewport: ViewportState): { minX: number; maxX: number; minY: number; maxY: number } {
+function visibleGridBounds(
+  width: number,
+  height: number,
+  viewport: ViewportState,
+  paddingCells = 1
+): { minX: number; maxX: number; minY: number; maxY: number } {
   const step = CELL * viewport.zoom
   return {
-    minX: Math.floor(-viewport.x / step) - 1,
-    maxX: Math.ceil((width - viewport.x) / step) + 1,
-    minY: Math.floor(-viewport.y / step) - 1,
-    maxY: Math.ceil((height - viewport.y) / step) + 1
+    minX: Math.floor(-viewport.x / step) - paddingCells,
+    maxX: Math.ceil((width - viewport.x) / step) + paddingCells,
+    minY: Math.floor(-viewport.y / step) - paddingCells,
+    maxY: Math.ceil((height - viewport.y) / step) + paddingCells
   }
 }
 
-function visibleEntities(project: FactoryProject, width: number, height: number, viewport: ViewportState): FactoryEntity[] {
-  const bounds = visibleGridBounds(width, height, viewport)
+function visibleEntities(
+  project: FactoryProject,
+  width: number,
+  height: number,
+  viewport: ViewportState,
+  overscanCells = 1
+): FactoryEntity[] {
+  const bounds = visibleGridBounds(width, height, viewport, overscanCells)
   return project.entities.filter((entity) => (
     entity.position.x >= bounds.minX && entity.position.x <= bounds.maxX
     && entity.position.y >= bounds.minY && entity.position.y <= bounds.maxY
@@ -400,12 +806,19 @@ function previewProject(preview: BeltPreview): FactoryProject {
   }
 }
 
-function drawTunnelLinks(ctx: CanvasRenderingContext2D, project: FactoryProject, viewport: ViewportState, visibleIds?: Set<string>): void {
+function drawTunnelLinks(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  viewport: ViewportState,
+  visibleIds?: Set<string>,
+  entityIndex?: Map<string, FactoryEntity>,
+  candidates: FactoryEntity[] = project.entities
+): void {
   const handled = new Set<string>()
-  project.entities.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
+  candidates.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
     if (visibleIds && !visibleIds.has(entrance.id)) return
     if (handled.has(entrance.id)) return
-    const exit = findTunnelExit(project, entrance)
+    const exit = findTunnelExit(project, entrance, entityIndex)
     if (!exit || handled.has(exit.id)) return
     handled.add(entrance.id)
     handled.add(exit.id)
@@ -440,9 +853,14 @@ function drawTunnelLink(ctx: CanvasRenderingContext2D, start: GridPosition, end:
   ctx.restore()
 }
 
-function findTunnelExit(project: FactoryProject, entrance: FactoryEntity): FactoryEntity | undefined {
+function findTunnelExit(
+  project: FactoryProject,
+  entrance: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): FactoryEntity | undefined {
   for (let distance = 2; distance <= 5; distance += 1) {
-    const candidate = entityAtCell(project, offsetPosition(entrance.position, entrance.direction, distance))
+    const position = offsetPosition(entrance.position, entrance.direction, distance)
+    const candidate = entityIndex?.get(positionKey(position)) ?? entityAtCell(project, position)
     if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
   }
   return undefined

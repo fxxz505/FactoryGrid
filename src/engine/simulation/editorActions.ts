@@ -1,4 +1,4 @@
-﻿import { buildingById } from '../../data/machines'
+import { buildingById } from '../../data/machines'
 import { createEntity, cloneProject } from '../../data/examples'
 import type {
   Blueprint,
@@ -42,16 +42,25 @@ export function placeBuilding(
   const next = cloneProject(project)
   pushHistory(next)
   removeAt(next, position)
-  const entity = createEntity({
-    id: type + '-' + Date.now().toString(36) + '-' + Math.abs(position.x) + '-' + Math.abs(position.y),
+  const entity = createPlacementEntity(
     type,
     position,
-    direction
-  })
+    direction,
+    type + '-' + Date.now().toString(36) + '-' + Math.abs(position.x) + '-' + Math.abs(position.y)
+  )
   next.entities.push(entity)
   if (isBelt(entity)) next.belts[entity.id] = {}
   next.selectedEntityId = entity.id
   return next
+}
+
+export function createPlacementEntity(
+  type: BuildingType,
+  position: GridPosition,
+  direction: Direction,
+  id = 'placement-preview'
+): FactoryEntity {
+  return createEntity({ id, type, position, direction })
 }
 
 export function deleteAt(project: FactoryProject, position: GridPosition): FactoryProject {
