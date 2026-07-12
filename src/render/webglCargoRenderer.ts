@@ -5,26 +5,34 @@ in vec2 a_position;
 in float a_size;
 in vec3 a_color;
 in float a_sides;
+in float a_kind;
 uniform vec2 u_resolution;
 out vec3 v_color;
 flat out float v_sides;
+flat out float v_kind;
 void main() {
   vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
   gl_PointSize = a_size;
   v_color = a_color;
   v_sides = a_sides;
+  v_kind = a_kind;
 }`
 
 const FRAGMENT_SHADER = `#version 300 es
 precision mediump float;
 in vec3 v_color;
 flat in float v_sides;
+flat in float v_kind;
 out vec4 outColor;
 void main() {
   vec2 p = gl_PointCoord * 2.0 - 1.0;
   float radius = length(p);
-  if (v_sides < 2.5) {
+  if (v_kind > 0.5 && v_kind < 1.5) {
+    if (radius > 0.92 || p.x > 0.0) discard;
+  } else if (v_kind > 1.5 && v_kind < 2.5) {
+    if (abs(p.y) > 0.9 || p.x < -0.9 || p.x > 0.0) discard;
+  } else if (v_sides < 2.5) {
     if (radius > 0.92) discard;
   } else {
     float angle = atan(p.y, p.x) + 1.5707963;
@@ -70,22 +78,23 @@ export class WebglCargoRenderer {
     gl.clearColor(0, 0, 0, 0)
     gl.clear(gl.COLOR_BUFFER_BIT)
     if (!points.length) return
-    const data = new Float32Array(points.length * 7)
+    const data = new Float32Array(points.length * 8)
     points.forEach((point, index) => {
       const color = parseColor(point.color)
       data.set([
         point.x * ratio, point.y * ratio, point.radius * 2 * ratio,
-        color[0], color[1], color[2], point.sides
-      ], index * 7)
+        color[0], color[1], color[2], point.sides, point.kind
+      ], index * 8)
     })
     gl.useProgram(program)
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW)
-    const stride = 7 * 4
+    const stride = 8 * 4
     bindAttribute(gl, program, 'a_position', 2, stride, 0)
     bindAttribute(gl, program, 'a_size', 1, stride, 2 * 4)
     bindAttribute(gl, program, 'a_color', 3, stride, 3 * 4)
     bindAttribute(gl, program, 'a_sides', 1, stride, 6 * 4)
+    bindAttribute(gl, program, 'a_kind', 1, stride, 7 * 4)
     gl.uniform2f(gl.getUniformLocation(program, 'u_resolution'), width, height)
     gl.drawArrays(gl.POINTS, 0, points.length)
   }

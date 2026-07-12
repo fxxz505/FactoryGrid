@@ -1,6 +1,6 @@
 import { shapeById } from '../data/resources'
 import type { AreaPreview, BeltPreview, Direction, FactoryEntity, FactoryProject, GridPosition, ShapeId, ViewportState } from '../models/factory'
-import { entityConnectionDirections, machineGeometryFor, machinePortRoles, planBeltSprite, type BeltSpritePlan, type MachineGeometryStyle, type MachinePort } from './factoryAssets'
+import { findTunnelExit, machineGeometryFor, machinePortRoles, planBeltSprite, resolveTunnelEndpointMode, type BeltSpritePlan, type MachineGeometryStyle, type MachinePort } from './factoryAssets'
 
 export const CELL = 46
 export const BELT_ITEM_RADIUS = 10.5
@@ -76,8 +76,6 @@ export function areVisibleFactoryChunksCached(
       if (!snapshot.entities.get(key)?.length) continue
       const signature = snapshot.signatures.get(key) ?? ''
       if (cache.staticChunks.get(key)?.signature !== signature) return false
-      if (snapshot.entities.get(key)?.some((entity) => entity.kind !== 'belt')
-        && cache.overlayChunks.get(key)?.signature !== signature) return false
     }
   }
   return true
@@ -98,6 +96,7 @@ export function prewarmFactoryChunks(
     minY: visible.minY - FACTORY_CHUNK_PREFETCH_RING,
     maxY: visible.maxY + FACTORY_CHUNK_PREFETCH_RING
   }
+  const ratio = factoryChunkRenderRatio(project, viewport.zoom)
 
   for (let chunkY = bounds.minY; chunkY <= bounds.maxY; chunkY += 1) {
     for (let chunkX = bounds.minX; chunkX <= bounds.maxX; chunkX += 1) {
@@ -105,13 +104,9 @@ export function prewarmFactoryChunks(
       const entities = snapshot.entities.get(key)
       if (!entities?.length) continue
       const signature = snapshot.signatures.get(key) ?? ''
-      if (cache.staticChunks.get(key)?.signature !== signature) {
-        getFactoryChunk(cache.staticChunks, cache, key, signature, project, entities, chunkX, chunkY, 'static')
-        return 1
-      }
-      if (entities.some((entity) => entity.kind !== 'belt')
-        && cache.overlayChunks.get(key)?.signature !== signature) {
-        getFactoryChunk(cache.overlayChunks, cache, key, signature, project, entities, chunkX, chunkY, 'overlay')
+      const cached = cache.staticChunks.get(key)
+      if (cached?.signature !== signature || cached.ratio !== ratio) {
+        getFactoryChunk(cache.staticChunks, cache, key, signature, project, entities, chunkX, chunkY, 'static', ratio)
         return 1
       }
     }
@@ -263,6 +258,7 @@ export interface CargoRenderPoint {
   radius: number
   color: string
   sides: number
+  kind: number
 }
 
 export function createFactoryRenderScene(
@@ -364,7 +360,8 @@ export function collectFactoryCargoPoints(
       ...point,
       radius,
       color: definition?.color ?? '#647278',
-      sides: definition?.tier === undefined || definition.tier === 0 ? 0 : definition.tier + 2
+      sides: definition?.tier === undefined || definition.tier === 0 ? 0 : definition.tier + 2,
+      kind: cargoShapeKind(runtime.item.shape)
     })
   })
   return points
@@ -376,20 +373,30 @@ export function renderFactoryMachineOverlayCanvas(
   scene: FactoryRenderScene = createFactoryRenderScene(canvas, project),
   placementPreview?: PlacementPreview,
   chunkCache?: FactoryChunkRenderCache,
-  chunkSnapshot: FactoryChunkSnapshot = createFactoryChunkSnapshot(project)
+  chunkSnapshot?: FactoryChunkSnapshot
 ): void {
+  void chunkCache
+  void chunkSnapshot
   const ctx = prepareCanvas(canvas, project)
   if (!ctx) return
   const viewport = project.viewport ?? DEFAULT_VIEWPORT
   ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
-  if (chunkCache) {
-    drawCachedFactoryChunks(ctx, project, viewport, canvas.clientWidth, canvas.clientHeight, chunkCache, chunkSnapshot, 'overlay')
-  } else {
-    scene.visible
-      .filter((entity) => entity.kind !== 'belt')
-      .forEach((entity) => drawMachineOccluder(ctx, entity, viewport))
-  }
+  scene.visible
+    .filter((entity) => entity.kind !== 'belt')
+    .forEach((entity) => drawMachineAssetAtViewport(ctx, project, entity, viewport, scene.entityIndex))
   if (placementPreview) drawPlacementPreview(ctx, project, placementPreview, viewport)
+}
+
+function drawMachineAssetAtViewport(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  entity: FactoryEntity,
+  viewport: ViewportState,
+  entityIndex?: Map<string, FactoryEntity>
+): void {
+  const screen = gridToScreen(entity.position, viewport)
+  const size = CELL * viewport.zoom
+  drawMachineAsset(ctx, project, entity, screen.x, screen.y, size, viewport.zoom, entityIndex)
 }
 
 function drawCachedFactoryChunks(
@@ -421,7 +428,8 @@ function drawCachedFactoryChunks(
         entities,
         chunkX,
         chunkY,
-        layer
+        layer,
+        factoryChunkRenderRatio(project, viewport.zoom)
       )
       const screen = gridToScreen(
         { x: chunkX * FACTORY_CHUNK_CELLS, y: chunkY * FACTORY_CHUNK_CELLS },
@@ -447,9 +455,9 @@ function getFactoryChunk(
   entities: FactoryEntity[],
   chunkX: number,
   chunkY: number,
-  layer: 'static' | 'overlay'
+  layer: 'static' | 'overlay',
+  ratio: number
 ): FactoryChunkCacheEntry {
-  const ratio = 1
   const existing = targetCache.get(key)
   if (existing && existing.signature === signature && existing.ratio === ratio) {
     targetCache.delete(key)
@@ -492,15 +500,21 @@ function renderFactoryChunk(
   }
   if (layer === 'static') {
     const belts = entities.filter((entity) => entity.kind === 'belt')
-    const machines = entities.filter((entity) => entity.kind !== 'belt')
     belts.forEach((entity) => drawEntity(ctx, project, entity, false, localViewport))
-    machines.forEach((entity) => drawEntity(ctx, project, entity, false, localViewport))
   } else {
-    entities
-      .filter((entity) => entity.kind !== 'belt')
-      .forEach((entity) => drawMachineOccluder(ctx, entity, localViewport))
+    entities.filter((entity) => entity.kind !== 'belt')
   }
   return { canvas, signature, zoom, ratio, padding }
+}
+
+export function factoryChunkRenderRatio(
+  project: FactoryProject,
+  zoom: number,
+  devicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1
+): number {
+  if (project.performance?.quality === 'performance') return 1
+  const cap = project.performance?.quality === 'balanced' ? 1.5 : 2
+  return Math.min(cap, Math.max(1, zoom, devicePixelRatio))
 }
 
 function drawSelectedEntity(
@@ -579,26 +593,6 @@ function drawPlacementPreview(
     size - 4 * viewport.zoom,
     size - 4 * viewport.zoom
   )
-  ctx.restore()
-}
-
-function drawMachineOccluder(ctx: CanvasRenderingContext2D, entity: FactoryEntity, viewport: ViewportState): void {
-  const screen = gridToScreen(entity.position, viewport)
-  const scale = viewport.zoom
-  const size = CELL * scale
-  const style = machineGeometryFor(entity.type)
-  const body = size * 0.68 * style.scale
-  const bodyX = screen.x + (size - body) / 2
-  const bodyY = screen.y + (size - body) / 2
-
-  ctx.save()
-  roundedRectPath(ctx, bodyX, bodyY, body, body, 6 * scale)
-  ctx.fillStyle = style.body
-  ctx.fill()
-  ctx.strokeStyle = style.rim
-  ctx.lineWidth = 2 * scale
-  ctx.stroke()
-  drawMachineCore(ctx, style, screen.x + size / 2, screen.y + size / 2, body, scale, entity.direction)
   ctx.restore()
 }
 
@@ -681,6 +675,16 @@ function drawShapeBatch(
 }
 
 function appendShapePath(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: number, radius: number): void {
+  if (shape === 'half-circle') {
+    ctx.moveTo(x, y - radius)
+    ctx.arc(x, y, radius, -Math.PI / 2, Math.PI / 2, true)
+    ctx.closePath()
+    return
+  }
+  if (shape === 'half-square') {
+    ctx.rect(x - radius, y - radius, radius, radius * 2)
+    return
+  }
   const tier = shapeById[shape]?.tier
   if (tier !== undefined) {
     appendTierPath(ctx, tier, x, y, radius)
@@ -947,19 +951,6 @@ function drawTunnelLink(ctx: CanvasRenderingContext2D, start: GridPosition, end:
   ctx.restore()
 }
 
-function findTunnelExit(
-  project: FactoryProject,
-  entrance: FactoryEntity,
-  entityIndex?: Map<string, FactoryEntity>
-): FactoryEntity | undefined {
-  const maxDistance = entrance.level && entrance.level >= 3 ? 9 : entrance.level && entrance.level >= 2 ? 7 : 5
-  for (let distance = 2; distance <= maxDistance; distance += 1) {
-    const position = offsetPosition(entrance.position, entrance.direction, distance)
-    const candidate = entityIndex?.get(positionKey(position)) ?? entityAtCell(project, position)
-    if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
-  }
-  return undefined
-}
 function drawEntity(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, selected: boolean, viewport: ViewportState, scene?: FactoryRenderScene): void {
   const screen = gridToScreen(entity.position, viewport)
   const scale = viewport.zoom
@@ -1045,7 +1036,7 @@ export function resolveBeltInputDirection(
   const incoming = directions().find((direction) => {
     if (direction === entity.direction) return false
     const neighbor = index.get(positionKey(offsetPosition(entity.position, direction)))
-    return !!neighbor && canFeedPosition(neighbor, entity.position, oppositeDirection(direction))
+    return !!neighbor && canFeedPosition(project, neighbor, entity.position, oppositeDirection(direction), index)
   })
   return incoming ?? oppositeDirection(entity.direction)
 }
@@ -1054,12 +1045,12 @@ function beltInputDirection(project: FactoryProject, entity: FactoryEntity, enti
   return resolveBeltInputDirection(project, entity, entityIndex)
 }
 
-function canFeedPosition(entity: FactoryEntity, position: GridPosition, portDirection: Direction): boolean {
+function canFeedPosition(project: FactoryProject, entity: FactoryEntity, position: GridPosition, portDirection: Direction, entityIndex?: Map<string, FactoryEntity>): boolean {
   if (entity.kind === 'belt') {
     const next = offsetPosition(entity.position, entity.direction)
     return next.x === position.x && next.y === position.y
   }
-  return machinePortRoles(entity).some((port) => port.role === 'output' && port.direction === portDirection)
+  return machinePortRoles(entity, project, entityIndex).some((port) => port.role === 'output' && port.direction === portDirection)
 }
 
 function directions(): Direction[] {
@@ -1089,172 +1080,350 @@ function oppositeDirection(direction: Direction): Direction {
   return 'west'
 }
 
-function drawMachineAsset(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, x: number, y: number, size: number, scale: number): void {
+function drawMachineAsset(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  entity: FactoryEntity,
+  x: number,
+  y: number,
+  size: number,
+  scale: number,
+  entityIndex?: Map<string, FactoryEntity>
+): void {
   const style = machineGeometryFor(entity.type)
   const cx = x + size / 2
   const cy = y + size / 2
-  const body = size * 0.68 * style.scale
+  const body = size * 0.82 * style.scale
   const bodyX = cx - body / 2
   const bodyY = cy - body / 2
 
   ctx.save()
   ctx.shadowColor = 'rgba(31, 45, 54, 0.16)'
-  ctx.shadowBlur = 8 * scale
-  ctx.shadowOffsetY = 3 * scale
-  drawMachineConnector(ctx, project, entity, x, y, size, style)
+  ctx.shadowBlur = 6 * scale
+  ctx.shadowOffsetY = 2.5 * scale
+  const ports = machinePortRoles(entity, project)
+  const connectedPorts = ports.filter((port) => machinePortConnectionState(project, entity, port, entityIndex))
+  drawMachineConnectorBridges(ctx, connectedPorts, x, y, size, body)
   ctx.shadowColor = 'transparent'
 
-  roundedRectPath(ctx, bodyX, bodyY, body, body, 6 * scale)
+  roundedRectPath(ctx, bodyX, bodyY, body, body, 5 * scale)
+  ctx.fillStyle = '#b8c2be'
+  ctx.fill()
+  roundedRectPath(ctx, bodyX + 2.2 * scale, bodyY + 1.5 * scale, body - 4.4 * scale, body - 4.4 * scale, 4 * scale)
   ctx.fillStyle = style.body
   ctx.fill()
-  ctx.strokeStyle = style.rim
-  ctx.lineWidth = 2 * scale
+  ctx.strokeStyle = '#71807d'
+  ctx.lineWidth = 1.4 * scale
+  ctx.stroke()
+  roundedRectPath(ctx, bodyX + 6 * scale, bodyY + 5.5 * scale, body - 12 * scale, body - 12 * scale, 3 * scale)
+  ctx.fillStyle = '#fffaf0'
+  ctx.fill()
+  ctx.strokeStyle = '#cad1cd'
+  ctx.lineWidth = Math.max(0.8, scale)
   ctx.stroke()
 
-  drawMachineCore(ctx, style, cx, cy, body, scale, entity.direction)
+  drawMachineCore(ctx, project, entity, style, cx, cy, body, scale)
+  drawMachinePortMarkers(ctx, project, entity, ports, x, y, size, body, entityIndex)
   ctx.restore()
 }
 
-function drawMachineConnector(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, x: number, y: number, size: number, style: MachineGeometryStyle): void {
-  const cx = x + size / 2
-  const cy = y + size / 2
-  const track = size * 0.62
-  const rimTrack = track + size * 0.12
-  const directions = entityConnectionDirections(project, entity)
-  const ports = machinePortRoles(entity)
-
-  ctx.save()
-  ctx.lineJoin = 'round'
-  ctx.lineCap = 'round'
-  ctx.fillStyle = '#bfc4c7'
-  directions.forEach((direction) => drawConnectorArm(ctx, cx, cy, x, y, size, direction, rimTrack))
-  ctx.fillStyle = style.body === '#dbeee9' ? '#dbeee9' : '#dfe3e5'
-  directions.forEach((direction) => drawConnectorArm(ctx, cx, cy, x, y, size, direction, track))
-  ctx.strokeStyle = '#9ea5a9'
-  ctx.lineWidth = Math.max(1.2, size * 0.03)
-  directions.forEach((direction) => drawConnectorRail(ctx, cx, cy, x, y, size, direction, track))
-  drawMachinePortHousings(ctx, ports, x, y, size, track)
-  ctx.restore()
-}
-
-function drawMachinePortHousings(
+function drawMachineConnectorBridges(
   ctx: CanvasRenderingContext2D,
   ports: MachinePort[],
   x: number,
   y: number,
   size: number,
-  track: number
+  body: number
 ): void {
-  const length = size * 0.34
-  const thickness = track * 0.52
+  const outerTrack = size * 0.74
+  const innerTrack = size * 0.62
+  const bodyEdge = body / 2
+  ctx.save()
+  ctx.fillStyle = '#bfc4c7'
+  ports.forEach((port) => drawMachineConnectorBridge(ctx, x, y, size, bodyEdge, outerTrack, port.direction))
+  ctx.fillStyle = '#dfe3e5'
+  ports.forEach((port) => drawMachineConnectorBridge(ctx, x, y, size, bodyEdge, innerTrack, port.direction))
+  ctx.strokeStyle = '#9ea5a9'
+  ctx.lineWidth = Math.max(1, size * 0.035)
+  ports.forEach((port) => drawMachineConnectorBridgeRails(ctx, x, y, size, bodyEdge, innerTrack, port.direction))
+  ctx.restore()
+}
+
+function drawMachineConnectorBridge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  bodyEdge: number,
+  track: number,
+  direction: Direction
+): void {
+  const cx = x + size / 2
+  const cy = y + size / 2
+  if (direction === 'east') ctx.fillRect(cx + bodyEdge - 1, cy - track / 2, size / 2 - bodyEdge + 2, track)
+  else if (direction === 'west') ctx.fillRect(x - 1, cy - track / 2, size / 2 - bodyEdge + 2, track)
+  else if (direction === 'south') ctx.fillRect(cx - track / 2, cy + bodyEdge - 1, track, size / 2 - bodyEdge + 2)
+  else ctx.fillRect(cx - track / 2, y - 1, track, size / 2 - bodyEdge + 2)
+}
+
+function drawMachineConnectorBridgeRails(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  bodyEdge: number,
+  track: number,
+  direction: Direction
+): void {
+  const cx = x + size / 2
+  const cy = y + size / 2
+  const rail = track * 0.47
+  ctx.beginPath()
+  if (direction === 'east' || direction === 'west') {
+    const from = direction === 'east' ? cx + bodyEdge : x
+    const to = direction === 'east' ? x + size : cx - bodyEdge
+    ctx.moveTo(from, cy - rail); ctx.lineTo(to, cy - rail)
+    ctx.moveTo(from, cy + rail); ctx.lineTo(to, cy + rail)
+  } else {
+    const from = direction === 'south' ? cy + bodyEdge : y
+    const to = direction === 'south' ? y + size : cy - bodyEdge
+    ctx.moveTo(cx - rail, from); ctx.lineTo(cx - rail, to)
+    ctx.moveTo(cx + rail, from); ctx.lineTo(cx + rail, to)
+  }
+  ctx.stroke()
+}
+
+function drawMachinePortMarkers(
+  ctx: CanvasRenderingContext2D,
+  project: FactoryProject,
+  entity: FactoryEntity,
+  ports: MachinePort[],
+  x: number,
+  y: number,
+  size: number,
+  body: number,
+  entityIndex?: Map<string, FactoryEntity>
+): void {
+  const length = size * 0.15
+  const thickness = size * 0.19
 
   ports.forEach((port) => {
-    const center = portHousingCenter(x, y, size, port.direction)
+    const center = machinePortMarkerCenter(x, y, size, body, port.direction, length)
+    const connected = machinePortConnectionState(project, entity, port, entityIndex)
     ctx.save()
     ctx.translate(center.x, center.y)
     ctx.rotate(directionToRotation(port.direction))
-    drawMachinePortHousing(ctx, length, thickness, port.role)
+    drawMachinePortMarker(ctx, length, thickness, port.role, connected)
     ctx.restore()
   })
 }
 
-function drawMachinePortHousing(
+function drawMachinePortMarker(
   ctx: CanvasRenderingContext2D,
   length: number,
   thickness: number,
-  role: MachinePort['role']
+  role: MachinePort['role'],
+  connected: boolean
 ): void {
+  const direction = role === 'input' ? -1 : 1
   ctx.beginPath()
-  ctx.moveTo(-length * 0.52, -thickness * 0.42)
-  ctx.lineTo(length * 0.28, -thickness * 0.36)
-  ctx.lineTo(length * 0.5, -thickness * 0.2)
-  ctx.lineTo(length * 0.5, thickness * 0.2)
-  ctx.lineTo(length * 0.28, thickness * 0.36)
-  ctx.lineTo(-length * 0.52, thickness * 0.42)
+  ctx.moveTo(-length * 0.5, -thickness * 0.42)
+  ctx.lineTo(length * 0.24, -thickness * 0.42)
+  ctx.lineTo(length * 0.5, -thickness * 0.22)
+  ctx.lineTo(length * 0.5, thickness * 0.22)
+  ctx.lineTo(length * 0.24, thickness * 0.42)
+  ctx.lineTo(-length * 0.5, thickness * 0.42)
   ctx.closePath()
-  ctx.fillStyle = '#667176'
+  ctx.fillStyle = connected ? '#46565d' : '#657176'
   ctx.fill()
-  ctx.strokeStyle = '#4d595e'
-  ctx.lineWidth = Math.max(1, thickness * 0.1)
+  ctx.strokeStyle = '#26343b'
+  ctx.lineWidth = Math.max(0.8, thickness * 0.09)
   ctx.stroke()
 
   ctx.beginPath()
-  ctx.moveTo(-length * 0.34, -thickness * 0.26)
-  ctx.lineTo(length * 0.2, -thickness * 0.23)
-  ctx.lineTo(length * 0.35, -thickness * 0.12)
-  ctx.lineTo(length * 0.35, thickness * 0.12)
-  ctx.lineTo(length * 0.2, thickness * 0.23)
-  ctx.lineTo(-length * 0.34, thickness * 0.26)
-  ctx.closePath()
-  ctx.fillStyle = 'rgba(255, 255, 252, 0.08)'
-  ctx.fill()
-
-  drawPortDirectionTriangle(ctx, length, thickness, role)
-}
-
-function drawPortDirectionTriangle(
-  ctx: CanvasRenderingContext2D,
-  length: number,
-  thickness: number,
-  role: MachinePort['role']
-): void {
-  const direction = role === 'input' ? -1 : 1
-  const centerX = role === 'input' ? -length * 0.02 : length * 0.04
-  const halfLength = length * 0.25
-  const halfHeight = thickness * 0.28
-
-  ctx.beginPath()
-  ctx.moveTo(centerX + direction * halfLength, 0)
-  ctx.lineTo(centerX - direction * halfLength, -halfHeight)
-  ctx.lineTo(centerX - direction * halfLength, halfHeight)
+  ctx.moveTo(direction * length * 0.32, 0)
+  ctx.lineTo(-direction * length * 0.22, -thickness * 0.25)
+  ctx.lineTo(-direction * length * 0.22, thickness * 0.25)
   ctx.closePath()
   ctx.fillStyle = role === 'input' ? INPUT_PORT_COLOR : OUTPUT_PORT_COLOR
   ctx.fill()
   ctx.strokeStyle = 'rgba(42, 54, 58, 0.42)'
-  ctx.lineWidth = Math.max(0.7, thickness * 0.045)
+  ctx.lineWidth = Math.max(0.6, thickness * 0.055)
   ctx.stroke()
 }
 
-function portHousingCenter(x: number, y: number, size: number, direction: Direction): { x: number; y: number } {
-  if (direction === 'east') return { x: x + size, y: y + size / 2 }
-  if (direction === 'west') return { x, y: y + size / 2 }
-  if (direction === 'south') return { x: x + size / 2, y: y + size }
-  return { x: x + size / 2, y }
-}
-function drawConnectorArm(ctx: CanvasRenderingContext2D, cx: number, cy: number, x: number, y: number, size: number, direction: Direction, track: number): void {
-  const overlap = Math.max(1, size * 0.025)
-  if (direction === 'east') ctx.fillRect(cx - overlap, cy - track / 2, x + size - cx + overlap * 2, track)
-  else if (direction === 'west') ctx.fillRect(x - overlap, cy - track / 2, cx - x + overlap * 2, track)
-  else if (direction === 'south') ctx.fillRect(cx - track / 2, cy - overlap, track, y + size - cy + overlap * 2)
-  else ctx.fillRect(cx - track / 2, y - overlap, track, cy - y + overlap * 2)
+function machinePortMarkerCenter(
+  x: number,
+  y: number,
+  size: number,
+  body: number,
+  direction: Direction,
+  length: number
+): { x: number; y: number } {
+  const cx = x + size / 2
+  const cy = y + size / 2
+  const offset = body / 2 - length * 0.12
+  if (direction === 'east') return { x: cx + offset, y: cy }
+  if (direction === 'west') return { x: cx - offset, y: cy }
+  if (direction === 'south') return { x: cx, y: cy + offset }
+  return { x: cx, y: cy - offset }
 }
 
-function drawConnectorRail(ctx: CanvasRenderingContext2D, cx: number, cy: number, x: number, y: number, size: number, direction: Direction, track: number): void {
-  const offset = track * 0.47
-  const overlap = Math.max(1, size * 0.025)
-  ctx.beginPath()
-  if (direction === 'east' || direction === 'west') {
-    const from = direction === 'east' ? cx : x - overlap
-    const to = direction === 'east' ? x + size + overlap : cx
-    ctx.moveTo(from, cy - offset)
-    ctx.lineTo(to, cy - offset)
-    ctx.moveTo(from, cy + offset)
-    ctx.lineTo(to, cy + offset)
-  } else {
-    const from = direction === 'south' ? cy : y - overlap
-    const to = direction === 'south' ? y + size + overlap : cy
-    ctx.moveTo(cx - offset, from)
-    ctx.lineTo(cx - offset, to)
-    ctx.moveTo(cx + offset, from)
-    ctx.lineTo(cx + offset, to)
+function machinePortConnectionState(
+  project: FactoryProject,
+  entity: FactoryEntity,
+  port: MachinePort,
+  entityIndex?: Map<string, FactoryEntity>
+): boolean {
+  const index = entityIndex ?? new Map(project.entities.map((candidate) => [positionKey(candidate.position), candidate]))
+  const neighborPosition = offsetPosition(entity.position, port.direction)
+  const neighbor = index.get(positionKey(neighborPosition))
+  if (!neighbor) return false
+
+  const facing = oppositeDirection(port.direction)
+  if (neighbor.kind === 'belt') {
+    const plan = planBeltSprite(project, neighbor, index)
+    if (!plan.connections.includes(facing)) return false
+    if (port.role === 'output') return resolveBeltInputDirection(project, neighbor, index) === facing
+    return neighbor.direction === facing
   }
-  ctx.stroke()
+
+  return machinePortRoles(neighbor, project, index).some((neighborPort) => (
+    neighborPort.direction === facing && neighborPort.role !== port.role
+  ))
 }
-function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometryStyle, cx: number, cy: number, body: number, scale: number, direction: Direction): void {
-  const r = body * 0.18
+function drawMachineCore(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, style: MachineGeometryStyle, cx: number, cy: number, body: number, scale: number): void {
+  const direction = entity.direction
   ctx.fillStyle = style.accent
   ctx.strokeStyle = style.rim
   ctx.lineWidth = 1.5 * scale
+
+  ctx.save()
+  ctx.translate(cx, cy)
+  ctx.rotate(directionToRotation(direction))
+  drawMachineFunction(ctx, project, entity, style, body, scale)
+  ctx.restore()
+}
+
+function drawMachineFunction(ctx: CanvasRenderingContext2D, project: FactoryProject, entity: FactoryEntity, style: MachineGeometryStyle, body: number, scale: number): void {
+  const cx = 0
+  const cy = 0
+  const r = body * 0.18
+  const dark = '#26343b'
+  const light = '#fffaf0'
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  if (entity.type.startsWith('source-')) {
+    drawSourceCore(ctx, entity.type, style, body, scale)
+    return
+  }
+  if (entity.type === 'splitter' || entity.type === 'merger') {
+    ctx.fillStyle = dark
+    roundedRectPath(ctx, -body * 0.23, -body * 0.30, body * 0.46, body * 0.60, 4 * scale)
+    ctx.fill()
+    ctx.strokeStyle = '#72b5a9'
+    ctx.lineWidth = 5 * scale
+    ctx.beginPath()
+    const merge = entity.type === 'merger'
+    ctx.moveTo(merge ? -body * 0.15 : body * 0.15, -body * 0.17)
+    ctx.lineTo(merge ? body * 0.08 : -body * 0.08, 0)
+    ctx.lineTo(merge ? -body * 0.15 : body * 0.15, body * 0.17)
+    ctx.stroke()
+    return
+  }
+  if (entity.type === 'tunnel') {
+    const mode = resolveTunnelEndpointMode(project, entity)
+    ctx.fillStyle = dark
+    roundedRectPath(ctx, -body * 0.30, -body * 0.28, body * 0.60, body * 0.56, 5 * scale)
+    ctx.fill()
+    ctx.fillStyle = '#66757b'
+    ctx.beginPath()
+    ctx.arc(0, body * 0.07, body * 0.22, Math.PI, Math.PI * 2)
+    ctx.lineTo(body * 0.22, body * 0.22)
+    ctx.lineTo(-body * 0.22, body * 0.22)
+    ctx.closePath()
+    ctx.fill()
+    ctx.fillStyle = '#11191c'
+    ctx.beginPath()
+    ctx.arc(0, body * 0.09, body * 0.13, Math.PI, Math.PI * 2)
+    ctx.lineTo(body * 0.13, body * 0.22)
+    ctx.lineTo(-body * 0.13, body * 0.22)
+    ctx.closePath()
+    ctx.fill()
+    ctx.strokeStyle = mode === 'exit' ? OUTPUT_PORT_COLOR : INPUT_PORT_COLOR
+    ctx.lineWidth = 4 * scale
+    ctx.beginPath()
+    ctx.moveTo(0, mode === 'exit' ? body * 0.11 : -body * 0.20)
+    ctx.lineTo(0, mode === 'exit' ? -body * 0.15 : body * 0.06)
+    ctx.stroke()
+    ctx.fillStyle = mode === 'exit' ? OUTPUT_PORT_COLOR : INPUT_PORT_COLOR
+    ctx.beginPath()
+    ctx.moveTo(mode === 'exit' ? body * 0.10 : -body * 0.10, mode === 'exit' ? -body * 0.10 : body * 0.01)
+    ctx.lineTo(mode === 'exit' ? -body * 0.10 : body * 0.10, mode === 'exit' ? -body * 0.10 : body * 0.01)
+    ctx.lineTo(0, mode === 'exit' ? -body * 0.23 : body * 0.14)
+    ctx.closePath()
+    ctx.fill()
+    return
+  }
+  if (entity.type === 'launcher') {
+    ctx.fillStyle = dark
+    roundedRectPath(ctx, -body * 0.31, -body * 0.22, body * 0.62, body * 0.44, 4 * scale)
+    ctx.fill()
+    ctx.fillStyle = '#f7d45c'
+    ctx.beginPath(); ctx.moveTo(-body * 0.17, body * 0.13); ctx.lineTo(body * 0.21, 0); ctx.lineTo(-body * 0.17, -body * 0.13); ctx.closePath(); ctx.fill()
+    return
+  }
+  if (entity.type === 'cutter') {
+    ctx.fillStyle = dark
+    roundedRectPath(ctx, -body * 0.31, -body * 0.24, body * 0.62, body * 0.48, 4 * scale)
+    ctx.fill()
+    drawGear(ctx, 0, 0, body * 0.24, body * 0.17, 10, style.accent, scale)
+    return
+  }
+  if (entity.type === 'rotator') {
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.arc(0, 0, body * 0.30, 0, Math.PI * 2); ctx.fill()
+    ctx.strokeStyle = style.accent; ctx.lineWidth = 6 * scale; ctx.beginPath(); ctx.arc(0, 0, body * 0.19, 0.25, Math.PI * 1.7); ctx.stroke()
+    ctx.fillStyle = style.accent; ctx.beginPath(); ctx.moveTo(body * 0.22, -body * 0.17); ctx.lineTo(body * 0.29, -body * 0.02); ctx.lineTo(body * 0.13, -body * 0.05); ctx.closePath(); ctx.fill()
+    return
+  }
+  if (entity.type.startsWith('painter-')) {
+    ctx.fillStyle = dark; roundedRectPath(ctx, -body * 0.30, -body * 0.24, body * 0.60, body * 0.48, 4 * scale); ctx.fill()
+    drawPainterColorMark(ctx, style.accent, body, scale)
+    return
+  }
+  if (entity.type === 'stacker') {
+    ctx.fillStyle = dark; roundedRectPath(ctx, -body * 0.30, -body * 0.29, body * 0.60, body * 0.58, 4 * scale); ctx.fill()
+    for (let i = 0; i < 3; i += 1) { ctx.fillStyle = i === 1 ? '#d6c76e' : light; roundedRectPath(ctx, -body * (0.19 - i * 0.03), body * (0.12 - i * 0.12), body * (0.38 - i * 0.06), body * 0.07, 1.5 * scale); ctx.fill() }
+    ctx.strokeStyle = '#f7d45c'; ctx.lineWidth = 5 * scale; ctx.beginPath(); ctx.moveTo(0, -body * 0.24); ctx.lineTo(0, -body * 0.04); ctx.stroke()
+    return
+  }
+  if (entity.type === 'furnace') {
+    ctx.fillStyle = dark; roundedRectPath(ctx, -body * 0.36, -body * 0.28, body * 0.72, body * 0.56, 5 * scale); ctx.fill()
+    ctx.fillStyle = '#743c29'; ctx.beginPath(); ctx.arc(0, 0, body * 0.24, 0, Math.PI * 2); ctx.fill()
+    ctx.fillStyle = '#f1bc69'; ctx.beginPath(); ctx.arc(0, 0, body * 0.17, 0, Math.PI * 2); ctx.fill()
+    ctx.fillStyle = '#d07048'; ctx.beginPath(); ctx.arc(0, 0, body * 0.09, 0, Math.PI * 2); ctx.fill()
+    return
+  }
+  if (entity.type === 'assembler') {
+    drawChamber(ctx, body, '#63b66c', '#b7dfbf', scale, 3)
+    return
+  }
+  if (entity.type === 'research-lab') {
+    drawChamber(ctx, body, '#8d72aa', '#d9cee7', scale, 4)
+    return
+  }
+  if (entity.type === 'hub') {
+    ctx.fillStyle = dark; roundedRectPath(ctx, -body * 0.36, -body * 0.25, body * 0.72, body * 0.50, 5 * scale); ctx.fill()
+    ctx.fillStyle = '#16857a'; roundedRectPath(ctx, -body * 0.27, -body * 0.16, body * 0.54, body * 0.32, 3 * scale); ctx.fill()
+    ctx.strokeStyle = light; ctx.lineWidth = 3 * scale; ctx.strokeRect(-body * 0.17, -body * 0.17, body * 0.34, body * 0.34)
+    return
+  }
+  if (entity.type === 'trash') {
+    ctx.fillStyle = dark; roundedRectPath(ctx, -body * 0.24, -body * 0.22, body * 0.48, body * 0.44, 3 * scale); ctx.fill()
+    ctx.strokeStyle = '#fff3ef'; ctx.lineWidth = 4 * scale; ctx.beginPath(); ctx.moveTo(-body * 0.11, -body * 0.10); ctx.lineTo(body * 0.11, body * 0.10); ctx.moveTo(body * 0.11, -body * 0.10); ctx.lineTo(-body * 0.11, body * 0.10); ctx.stroke()
+    return
+  }
 
   if (style.core === 'circle') {
     ctx.beginPath()
@@ -1286,9 +1455,6 @@ function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometrySt
       ctx.fill()
     }
   } else if (style.core === 'split' || style.core === 'merge') {
-    ctx.save()
-    ctx.translate(cx, cy)
-    ctx.rotate(directionToRotation(direction))
     ctx.lineCap = 'round'
     ctx.lineWidth = 3 * scale
     ctx.beginPath()
@@ -1306,11 +1472,7 @@ function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometrySt
       ctx.lineTo(0, 0)
     }
     ctx.stroke()
-    ctx.restore()
   } else if (style.core === 'pipe') {
-    ctx.save()
-    ctx.translate(cx, cy)
-    ctx.rotate(directionToRotation(direction))
     ctx.lineWidth = 4 * scale
     ctx.lineCap = 'round'
     ctx.beginPath()
@@ -1321,10 +1483,73 @@ function drawMachineCore(ctx: CanvasRenderingContext2D, style: MachineGeometrySt
     ctx.fillStyle = 'rgba(255, 252, 245, 0.55)'
     roundedRectPath(ctx, -body * 0.26, body * 0.12, body * 0.52, body * 0.08, 2 * scale)
     ctx.fill()
-    ctx.restore()
   } else if (style.core === 'bars') {
     for (let i = -1; i <= 1; i += 1) ctx.fillRect(cx - body * 0.22, cy + i * body * 0.12 - 1 * scale, body * 0.44, 2 * scale)
   }
+}
+
+function drawSourceCore(ctx: CanvasRenderingContext2D, type: FactoryEntity['type'], style: MachineGeometryStyle, body: number, scale: number): void {
+  ctx.fillStyle = '#26343b'
+  polygonPath(ctx, 0, 0, body * 0.28, 8, Math.PI / 8)
+  ctx.fill()
+  ctx.fillStyle = style.accent
+  if (type === 'source-square') { roundedRectPath(ctx, -body * 0.14, -body * 0.14, body * 0.28, body * 0.28, 2 * scale); ctx.fill() }
+  else if (type === 'source-diamond') { polygonPath(ctx, 0, 0, body * 0.19, 4, 0); ctx.fill() }
+  else if (type === 'source-star') { starPath(ctx, 0, 0, body * 0.18, body * 0.09); ctx.fill() }
+  else { ctx.beginPath(); ctx.arc(0, 0, body * 0.16, 0, Math.PI * 2); ctx.fill() }
+  ctx.strokeStyle = '#fffaf0'; ctx.lineWidth = 3 * scale; ctx.beginPath(); ctx.arc(0, 0, body * 0.21, 0, Math.PI * 2); ctx.stroke()
+}
+
+function drawGear(ctx: CanvasRenderingContext2D, x: number, y: number, outer: number, inner: number, teeth: number, accent: string, scale: number): void {
+  ctx.beginPath()
+  for (let index = 0; index < teeth * 2; index += 1) {
+    const angle = -Math.PI / 2 + index * Math.PI / teeth
+    const radius = index % 2 === 0 ? outer : inner
+    const px = x + Math.cos(angle) * radius
+    const py = y + Math.sin(angle) * radius
+    if (index === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
+  }
+  ctx.closePath()
+  ctx.fillStyle = accent
+  ctx.fill()
+  ctx.strokeStyle = '#26343b'
+  ctx.lineWidth = 2 * scale
+  ctx.stroke()
+  ctx.fillStyle = '#fffaf0'
+  ctx.beginPath()
+  ctx.arc(x, y, outer * 0.28, 0, Math.PI * 2)
+  ctx.fill()
+}
+
+function drawPainterColorMark(ctx: CanvasRenderingContext2D, color: string, body: number, scale: number): void {
+  roundedRectPath(ctx, -body * 0.18, -body * 0.18, body * 0.36, body * 0.36, 3 * scale)
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.strokeStyle = '#fffaf0'
+  ctx.lineWidth = 2.5 * scale
+  ctx.stroke()
+}
+
+function drawChamber(ctx: CanvasRenderingContext2D, body: number, accent: string, fill: string, scale: number, arms: number): void {
+  ctx.fillStyle = '#26343b'; polygonPath(ctx, 0, 0, body * 0.38, 8, Math.PI / 8); ctx.fill()
+  ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(0, 0, body * 0.23, 0, Math.PI * 2); ctx.fill()
+  ctx.strokeStyle = accent; ctx.lineWidth = 5 * scale; ctx.beginPath(); ctx.arc(0, 0, body * 0.18, 0.2, Math.PI * 1.55); ctx.stroke()
+  ctx.strokeStyle = '#46565d'; ctx.lineWidth = 5 * scale
+  for (let i = 0; i < arms; i += 1) { const a = i * Math.PI * 2 / arms + 0.35; ctx.beginPath(); ctx.moveTo(Math.cos(a) * body * 0.25, Math.sin(a) * body * 0.25); ctx.lineTo(Math.cos(a) * body * 0.35, Math.sin(a) * body * 0.35); ctx.stroke() }
+  ctx.fillStyle = '#f7d45c'; ctx.beginPath(); ctx.arc(0, 0, body * 0.06, 0, Math.PI * 2); ctx.fill()
+}
+
+function polygonPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number, sides: number, rotation = 0): void {
+  ctx.beginPath()
+  for (let i = 0; i < sides; i += 1) { const angle = rotation + i * Math.PI * 2 / sides; const x = cx + Math.cos(angle) * radius; const y = cy + Math.sin(angle) * radius; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y) }
+  ctx.closePath()
+}
+
+function starPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, outer: number, inner: number): void {
+  ctx.beginPath()
+  for (let i = 0; i < 10; i += 1) { const angle = -Math.PI / 2 + i * Math.PI / 5; const radius = i % 2 ? inner : outer; const x = cx + Math.cos(angle) * radius; const y = cy + Math.sin(angle) * radius; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y) }
+  ctx.closePath()
 }
 
 function drawBeltAsset(
@@ -1339,7 +1564,7 @@ function drawBeltAsset(
   const track = size * 0.62
   const cx = x + size / 2
   const cy = y + size / 2
-  const connections = plan.connections.length ? plan.connections : ['east'] as Direction[]
+  const connections = plan.connections
 
   ctx.save()
   ctx.lineJoin = 'round'
@@ -1482,9 +1707,6 @@ function cellCenter(position: GridPosition, viewport: ViewportState): { x: numbe
 function positionKey(position: GridPosition): string {
   return `${position.x},${position.y}`
 }
-function entityAtCell(project: FactoryProject, position: GridPosition): FactoryEntity | undefined {
-  return project.entities.find((entity) => entity.position.x === position.x && entity.position.y === position.y)
-}
 
 function offsetPosition(position: GridPosition, direction: Direction, distance = 1): GridPosition {
   if (direction === 'north') return { x: position.x, y: position.y - distance }
@@ -1522,7 +1744,13 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeId, x: number, y: 
   ctx.restore()
 }
 function shouldUseShapeAccent(shape: ShapeId): boolean {
-  return shapeById[shape]?.tier === undefined
+  return shapeById[shape]?.tier === undefined && shape !== 'half-circle' && shape !== 'half-square'
+}
+
+function cargoShapeKind(shape: ShapeId): number {
+  if (shape === 'half-circle') return 1
+  if (shape === 'half-square') return 2
+  return 0
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

@@ -47,7 +47,7 @@ import { MapPin, Plus, Scan, X, ZoomIn, ZoomOut } from '@lucide/vue'
 import { shapeById } from '../../data/resources'
 import type { Direction, FactoryEntity, FactoryProject, GridPosition, MapBookmark, ViewportState } from '../../models/factory'
 import { CELL } from '../../render/canvasRenderer'
-import { machinePortRoles, planBeltSprite } from '../../render/factoryAssets'
+import { findTunnelExit, machinePortRoles, planBeltSprite } from '../../render/factoryAssets'
 
 const props = defineProps<{
   project: FactoryProject
@@ -145,7 +145,7 @@ function requestWorkerBase(topology: string, width: number, height: number, pixe
   })
   props.project.entities.filter((entity) => entity.kind !== 'belt').forEach((entity) => {
     const point = localPoint(entity, pixelsPerCell)
-    machinePortRoles(entity).filter((port) => portConnectsToNeighbor(entity, port.direction, entityIndex)).forEach((port) => {
+    machinePortRoles(entity, props.project, entityIndex).filter((port) => portConnectsToNeighbor(entity, port.direction, entityIndex)).forEach((port) => {
       const end = connectionEnd(point, port.direction, pixelsPerCell * 0.52)
       lines.push({ x1: point.x, y1: point.y, x2: end.x, y2: end.y })
     })
@@ -153,7 +153,7 @@ function requestWorkerBase(topology: string, width: number, height: number, pixe
   const handled = new Set<string>()
   props.project.entities.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
     if (handled.has(entrance.id)) return
-    const exit = findTunnelExit(entrance, entityIndex)
+    const exit = findTunnelExit(props.project, entrance, entityIndex)
     if (!exit) return
     handled.add(entrance.id)
     handled.add(exit.id)
@@ -224,7 +224,7 @@ function drawMachine(
 ): void {
   const point = localPoint(entity, pixelsPerCell)
   const size = Math.max(3, pixelsPerCell * 0.72)
-  const connectedPorts = machinePortRoles(entity).filter((port) => (
+  const connectedPorts = machinePortRoles(entity, props.project, entityIndex).filter((port) => (
     portConnectsToNeighbor(entity, port.direction, entityIndex)
   ))
   if (connectedPorts.length) {
@@ -266,7 +266,7 @@ function portConnectsToNeighbor(
   if (neighbor.kind === 'belt') {
     return planBeltSprite(props.project, neighbor, entityIndex).connections.includes(oppositeDirection(direction))
   }
-  return machinePortRoles(neighbor).some((port) => port.direction === oppositeDirection(direction))
+  return machinePortRoles(neighbor, props.project, entityIndex).some((port) => port.direction === oppositeDirection(direction))
 }
 
 function drawTunnelLinks(
@@ -281,7 +281,7 @@ function drawTunnelLinks(
   ctx.setLineDash([pixelsPerCell * 0.45, pixelsPerCell * 0.35])
   props.project.entities.filter((entity) => entity.type === 'tunnel').forEach((entrance) => {
     if (handled.has(entrance.id)) return
-    const exit = findTunnelExit(entrance, entityIndex)
+    const exit = findTunnelExit(props.project, entrance, entityIndex)
     if (!exit) return
     handled.add(entrance.id)
     handled.add(exit.id)
@@ -293,18 +293,6 @@ function drawTunnelLinks(
     ctx.stroke()
   })
   ctx.restore()
-}
-
-function findTunnelExit(
-  entrance: FactoryEntity,
-  entityIndex: Map<string, FactoryEntity>
-): FactoryEntity | undefined {
-  const maxDistance = entrance.level && entrance.level >= 3 ? 9 : entrance.level && entrance.level >= 2 ? 7 : 5
-  for (let distance = 2; distance <= maxDistance; distance += 1) {
-    const candidate = entityIndex.get(positionKey(offsetPosition(entrance.position, entrance.direction, distance)))
-    if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
-  }
-  return undefined
 }
 
 function offsetPosition(

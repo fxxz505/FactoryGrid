@@ -1,6 +1,6 @@
 <template>
   <main class="shape-app">
-    <header class="shape-topbar">
+    <header v-if="false" class="shape-topbar" aria-hidden="true">
       <div class="brand-block">
         <span class="brand-mark">异</span>
         <div>
@@ -108,7 +108,6 @@
           @configure-assembler="openAssemblerRecipes"
           @configure-research="openResearchProjects"
         />
-        <SimulationBar :metrics="project.metrics" :errors="project.errors" :events="project.events" :performance="project.performance" />
       </section>
     </section>
 
@@ -179,7 +178,6 @@ import {
 } from '@lucide/vue'
 import FactoryCanvas from '../components/editor/FactoryCanvas.vue'
 import WorldMap from '../components/editor/WorldMap.vue'
-import SimulationBar from '../components/editor/SimulationBar.vue'
 import MachineIcon from '../components/editor/MachineIcon.vue'
 import { buildings, buildingById } from '../data/machines'
 import { shapeById } from '../data/resources'
@@ -524,6 +522,26 @@ function onKey(event: KeyboardEvent): void {
     return
   }
   if (worldMapOpen.value) return
+  if (key === 'p') {
+    event.preventDefault()
+    toggleRun()
+    return
+  }
+  if (key === 'n') {
+    event.preventDefault()
+    step()
+    return
+  }
+  if (key === 'home') {
+    event.preventDefault()
+    centerViewport()
+    return
+  }
+  if (key === 'z' && event.ctrlKey) {
+    event.preventDefault()
+    undoProject()
+    return
+  }
   const match = visibleBuildings.value.find((building) => building.hotkey.toLowerCase() === key)
   if (match) selectTool(match.id)
   if (key === 'r') rotateTool()

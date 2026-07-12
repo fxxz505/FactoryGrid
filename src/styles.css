@@ -16,7 +16,7 @@ button { cursor: pointer; }
   width: 100vw;
   height: 100vh;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   background: #efe9dc;
 }
 
@@ -57,7 +57,7 @@ button { cursor: pointer; }
 
 .shape-workspace { min-height: 0; overflow: hidden; display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 10px; padding: 10px; }
 .tool-panel { min-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; }
-.canvas-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: 1fr 72px; gap: 10px; }
+.canvas-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
 .panel-block, .factory-canvas-wrap, .simulation-bar {
   border: 1px solid rgba(38, 52, 59, 0.14); border-radius: 12px; background: rgba(255, 252, 245, 0.9);
   box-shadow: 0 14px 34px rgba(64, 75, 79, 0.12);
@@ -86,12 +86,23 @@ button { cursor: pointer; }
 }
 .machine-icon .icon-core { width: 18px; height: 18px; border: 3px solid currentColor; background: #f7d45c; box-shadow: inset 0 0 0 3px rgba(255,255,255,0.35); }
 .machine-icon.source-circle .icon-core, .machine-icon.source-star .icon-core, .machine-icon.source-iron .icon-core, .machine-icon.source-coal .icon-core, .machine-icon.source-copper .icon-core, .machine-icon[class*=painter] .icon-core { border-radius: 999px; }
-.machine-icon.source-diamond .icon-core, .machine-icon.cutter .icon-core { transform: rotate(45deg); }
+.machine-icon.source-diamond .icon-core { transform: rotate(45deg); }
 .machine-icon.belt .icon-core, .machine-icon.tunnel .icon-core, .machine-icon.launcher .icon-core { width: 24px; height: 10px; border-radius: 2px; }
+.machine-icon.cutter .icon-core { width: 22px; height: 22px; border: 4px dashed #26343b; border-radius: 999px; background: #d75d58; box-shadow: inset 0 0 0 5px #fffaf0; }
+.machine-icon.rotator .icon-core { border-radius: 999px; border-width: 5px; border-right-color: transparent; background: transparent; box-shadow: none; }
+.machine-icon[class*=painter] .icon-core { width: 18px; height: 18px; border: 3px solid #fffaf0; border-radius: 3px; background: currentColor; box-shadow: 0 0 0 2px #26343b; }
+.machine-icon.painter-red { color: #de615c; }
+.machine-icon.painter-blue { color: #5b8adf; }
+.machine-icon.painter-green { color: #63b66c; }
 .machine-icon.splitter .icon-core { clip-path: polygon(0 35%, 52% 35%, 78% 0, 100% 0, 68% 50%, 100% 100%, 78% 100%, 52% 65%, 0 65%); border: 0; }
 .machine-icon.merger .icon-core { clip-path: polygon(0 0, 22% 0, 48% 35%, 100% 35%, 100% 65%, 48% 65%, 22% 100%, 0 100%, 32% 50%); border: 0; }
-.machine-icon.stacker .icon-core, .machine-icon.assembler .icon-core { height: 16px; border-width: 0; background: repeating-linear-gradient(to bottom, #f7d45c 0 3px, transparent 3px 6px); }
+.machine-icon.stacker .icon-core { height: 17px; border-width: 0; background: repeating-linear-gradient(to bottom, #f7d45c 0 3px, transparent 3px 6px); }
+.machine-icon.assembler .icon-core { border-radius: 999px; border: 5px solid #63b66c; background: #b7dfbf; box-shadow: 0 -11px 0 -7px #26343b, 10px 6px 0 -7px #26343b, -10px 6px 0 -7px #26343b; }
 .machine-icon.furnace .icon-core { border-radius: 999px; background: #d07048; box-shadow: inset 0 0 0 5px rgba(255,236,198,0.45); }
+.machine-icon.research-lab .icon-core { border-radius: 999px; border: 5px solid #8d72aa; background: #d9cee7; box-shadow: 0 -11px 0 -7px #26343b, 11px 0 0 -7px #26343b, 0 11px 0 -7px #26343b, -11px 0 0 -7px #26343b; }
+.machine-icon.tunnel .icon-core { width: 24px; height: 18px; border: 5px solid #66757b; border-bottom: 0; border-radius: 14px 14px 3px 3px; background: #11191c; box-shadow: none; }
+.machine-icon.launcher .icon-core { width: 24px; height: 20px; border: 0; background: #f7d45c; clip-path: polygon(0 20%, 100% 50%, 0 80%); box-shadow: none; }
+.machine-icon.trash .icon-core { border-radius: 3px; background: linear-gradient(45deg, transparent 42%, #fff3ef 43% 57%, transparent 58%), linear-gradient(-45deg, transparent 42%, #fff3ef 43% 57%, transparent 58%), #8d3d36; box-shadow: none; }
 .machine-icon.source-iron .icon-core { background: #cfd6d3; }
 .machine-icon.source-coal .icon-core { background: #242424; }
 .machine-icon.source-copper .icon-core { background: #a66a3f; }
@@ -110,7 +121,7 @@ button { cursor: pointer; }
 .blueprint-options button.active { border-color: #16857a; background: #e8faf4; color: #15796f; }
 .blueprint-options select { grid-column: 1 / -1; padding: 0 7px; }
 
-.factory-canvas-wrap { min-height: 0; display: grid; grid-template-rows: minmax(44px, auto) minmax(0, 1fr); overflow: hidden; }
+.factory-canvas-wrap { min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 .canvas-head { min-width: 0; margin: 0; padding: 9px 12px; border-bottom: 1px solid rgba(38,52,59,0.12); background: rgba(255,252,245,0.8); }
 .canvas-head > div:first-child { min-width: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .canvas-legend { flex: 0 0 auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -166,7 +177,7 @@ button { cursor: pointer; }
 
 @media (max-width: 1180px) {
   body { overflow: auto; }
-  .shape-app { min-height: 100vh; height: auto; grid-template-rows: auto 1fr; }
+  .shape-app { min-height: 100vh; height: auto; grid-template-rows: 1fr; }
   .shape-topbar { grid-template-columns: 1fr; align-items: stretch; }
   .goal-strip { justify-content: start; }
   .shape-workspace { grid-template-columns: 1fr; }

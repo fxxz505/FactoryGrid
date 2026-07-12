@@ -7,6 +7,7 @@ export interface MachinePort {
   role: PortRole
 }
 
+export type TunnelEndpointMode = 'entrance' | 'exit' | 'unpaired'
 
 export type BeltSpriteKind = 'straight' | 'corner' | 'tee' | 'cross'
 
@@ -63,7 +64,7 @@ export function planBeltSprite(
   entityIndex?: Map<string, FactoryEntity>
 ): BeltSpritePlan {
   const connections = connectedDirections(project, belt, entityIndex)
-  const unique = normalizeConnections(connections.length > 0 ? connections : [belt.direction])
+  const unique = normalizeConnections(connections)
 
   if (unique.length >= 4) return { kind: 'cross', rotation: 0, connections: unique, direction: belt.direction }
   if (unique.length === 3) return { kind: 'tee', rotation: teeRotation(unique), connections: unique, direction: belt.direction }
@@ -77,11 +78,47 @@ export function planBeltSprite(
 
 export function entityConnectionDirections(project: FactoryProject, entity: FactoryEntity): Direction[] {
   if (entity.kind === 'belt') return connectedDirections(project, entity)
-  return normalizeConnections(machinePorts(entity).map((port) => port.direction))
+  return normalizeConnections(machinePorts(entity, project).map((port) => port.direction))
 }
 
-export function machinePortRoles(entity: FactoryEntity): MachinePort[] {
-  return machinePorts(entity)
+export function machinePortRoles(
+  entity: FactoryEntity,
+  project?: FactoryProject,
+  entityIndex?: Map<string, FactoryEntity>
+): MachinePort[] {
+  return machinePorts(entity, project, entityIndex)
+}
+
+export function resolveTunnelEndpointMode(
+  project: FactoryProject,
+  entity: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): TunnelEndpointMode {
+  if (entity.type !== 'tunnel') return 'unpaired'
+  if (findTunnelExit(project, entity, entityIndex)) return 'entrance'
+
+  const maxDistance = tunnelRange(entity)
+  for (let distance = 2; distance <= maxDistance; distance += 1) {
+    const candidatePosition = offsetPosition(entity.position, opposite(entity.direction), distance)
+    const candidate = entityIndex?.get(positionKey(candidatePosition)) ?? entityAt(project, candidatePosition)
+    if (candidate?.type !== 'tunnel' || candidate.direction !== entity.direction) continue
+    if (findTunnelExit(project, candidate, entityIndex)?.id === entity.id) return 'exit'
+  }
+  return 'unpaired'
+}
+
+export function findTunnelExit(
+  project: FactoryProject,
+  entrance: FactoryEntity,
+  entityIndex?: Map<string, FactoryEntity>
+): FactoryEntity | undefined {
+  if (entrance.type !== 'tunnel') return undefined
+  for (let distance = 2; distance <= tunnelRange(entrance); distance += 1) {
+    const position = offsetPosition(entrance.position, entrance.direction, distance)
+    const candidate = entityIndex?.get(positionKey(position)) ?? entityAt(project, position)
+    if (candidate?.type === 'tunnel' && candidate.direction === entrance.direction) return candidate
+  }
+  return undefined
 }
 
 export function connectedDirections(
@@ -90,20 +127,17 @@ export function connectedDirections(
   entityIndex?: Map<string, FactoryEntity>
 ): Direction[] {
   const dirs = new Set<Direction>()
-  dirs.add(entity.direction)
 
   directions().forEach((direction) => {
     const position = offsetPosition(entity.position, direction)
     const neighbor = entityIndex?.get(positionKey(position)) ?? entityAt(project, position)
     if (!neighbor) return
 
-    if (neighbor.type === 'splitter' && splitterPorts(neighbor.direction).includes(opposite(direction))) {
-      dirs.add(direction)
-      return
-    }
-
-    if (neighbor.kind !== 'belt' && machinePorts(neighbor).some((port) => port.direction === opposite(direction))) {
-      dirs.add(direction)
+    if (neighbor.kind !== 'belt') {
+      const matchingPort = machinePorts(neighbor, project, entityIndex).find((port) => port.direction === opposite(direction))
+      if (!matchingPort) return
+      const isBeltOutput = direction === entity.direction
+      if ((isBeltOutput && matchingPort.role === 'input') || (!isBeltOutput && matchingPort.role === 'output')) dirs.add(direction)
       return
     }
 
@@ -115,6 +149,11 @@ export function connectedDirections(
     if (pointsTo(neighbor, entity.position) || pointsTo(entity, neighbor.position)) dirs.add(direction)
   })
 
+  if (dirs.size === 0) {
+    const outputPosition = offsetPosition(entity.position, entity.direction)
+    const outputNeighbor = entityIndex?.get(positionKey(outputPosition)) ?? entityAt(project, outputPosition)
+    if (!outputNeighbor) dirs.add(entity.direction)
+  }
   return normalizeConnections(Array.from(dirs))
 }
 
@@ -151,8 +190,14 @@ function areOpposite(a: Direction, b: Direction): boolean {
   return opposite(a) === b
 }
 
-function machinePorts(entity: FactoryEntity): MachinePort[] {
+function machinePorts(entity: FactoryEntity, project?: FactoryProject, entityIndex?: Map<string, FactoryEntity>): MachinePort[] {
   if (entity.kind === 'source') return [{ direction: entity.direction, role: 'output' }]
+  if (entity.type === 'tunnel') {
+    const mode = project ? resolveTunnelEndpointMode(project, entity, entityIndex) : 'unpaired'
+    return mode === 'exit'
+      ? [{ direction: entity.direction, role: 'output' }]
+      : [{ direction: opposite(entity.direction), role: 'input' }]
+  }
   if (entity.type === 'splitter') {
     return splitterPorts(entity.direction).map((direction) => ({
       direction,
@@ -219,11 +264,15 @@ function positionKey(position: { x: number; y: number }): string {
   return `${position.x},${position.y}`
 }
 
-function offsetPosition(position: { x: number; y: number }, direction: Direction): { x: number; y: number } {
-  if (direction === 'north') return { x: position.x, y: position.y - 1 }
-  if (direction === 'south') return { x: position.x, y: position.y + 1 }
-  if (direction === 'west') return { x: position.x - 1, y: position.y }
-  return { x: position.x + 1, y: position.y }
+function offsetPosition(position: { x: number; y: number }, direction: Direction, distance = 1): { x: number; y: number } {
+  if (direction === 'north') return { x: position.x, y: position.y - distance }
+  if (direction === 'south') return { x: position.x, y: position.y + distance }
+  if (direction === 'west') return { x: position.x - distance, y: position.y }
+  return { x: position.x + distance, y: position.y }
+}
+
+function tunnelRange(entity: FactoryEntity): number {
+  return entity.level && entity.level >= 3 ? 9 : entity.level && entity.level >= 2 ? 7 : 5
 }
 
 function opposite(direction: Direction): Direction {

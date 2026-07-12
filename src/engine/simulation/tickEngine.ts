@@ -284,22 +284,23 @@ function nextRouterTarget(project: FactoryProject, entity: FactoryEntity, item: 
 function canAccept(project: FactoryProject, entity: FactoryEntity, item: ShapeItem, incoming?: Direction, index?: EntityIndex): boolean {
   if (entity.kind === 'belt') {
     const runtime = project.belts[entity.id]
-    const hasOpenPort = !incoming || incoming === oppositeDirection(entity.direction) || pointsToInput(index ?? buildEntityIndex(project), entity, incoming)
+    const hasOpenPort = !incoming || incoming === oppositeDirection(entity.direction) || pointsToInput(project, index ?? buildEntityIndex(project), entity, incoming)
     return hasOpenPort && !runtime?.item
   }
   if (entity.kind === 'hub') return true
   if (entity.type === 'trash') return entity.input.length < 1
   if (entity.type === 'splitter') return entity.input.length < 1 && (!incoming || incoming === oppositeDirection(entity.direction))
+  if (entity.type === 'tunnel') return entity.input.length < 1 && acceptsIncomingPort(project, entity, incoming, item.shape, index)
   if (ROUTER_TYPES.includes(entity.type)) return entity.input.length < 1
-  if (entity.kind === 'processor') return acceptsIncomingPort(entity, incoming, item.shape) && hasInputRoom(entity, item.shape) && acceptsShape(project, entity, item.shape)
+  if (entity.kind === 'processor') return acceptsIncomingPort(project, entity, incoming, item.shape, index) && hasInputRoom(entity, item.shape) && acceptsShape(project, entity, item.shape)
   return false
 }
 
 
-function acceptsIncomingPort(entity: FactoryEntity, incoming?: Direction, shape?: ShapeId): boolean {
+function acceptsIncomingPort(project: FactoryProject, entity: FactoryEntity, incoming?: Direction, shape?: ShapeId, index?: EntityIndex): boolean {
   if (!incoming) return true
   if (entity.type === 'furnace' && shape) return acceptsFurnacePort(entity, incoming, shape)
-  return machinePortRoles(entity).some((port) => port.role === 'input' && port.direction === incoming)
+  return machinePortRoles(entity, project, index).some((port) => port.role === 'input' && port.direction === incoming)
 }
 function acceptItem(
   project: FactoryProject,
@@ -376,9 +377,14 @@ function transformShape(type: FactoryEntity['type'], shape: ShapeId): ShapeId {
     return shape
   }
   if (type === 'rotator') return shape === 'star' ? 'rotated-star' : shape
-  if (type === 'painter-red') return shape === 'circle' ? 'circle-red' : shape
-  if (type === 'painter-blue') return shape === 'square' || shape === 'diamond' ? 'square-blue' : shape
-  if (type === 'painter-green') return shape === 'star' ? 'star-green' : shape
+  if (type === 'painter-red') return paintedShape(shape, 'red')
+  if (type === 'painter-blue') return paintedShape(shape, 'blue')
+  if (type === 'painter-green') return paintedShape(shape, 'green')
+  return shape
+}
+
+function paintedShape(shape: ShapeId, color: 'red' | 'blue' | 'green'): ShapeId {
+  if (shape === 'circle' || shape === 'square' || shape === 'star' || shape === 'diamond') return `${shape}-${color}` as ShapeId
   return shape
 }
 
@@ -408,9 +414,7 @@ function isFurnaceFuel(shape: ShapeId): boolean {
   return shape === 'coal-ore'
 }
 function acceptsShape(project: FactoryProject, entity: FactoryEntity, shape: ShapeId): boolean {
-  if (entity.type === 'painter-red') return shape === 'circle'
-  if (entity.type === 'painter-blue') return shape === 'square' || shape === 'diamond'
-  if (entity.type === 'painter-green') return shape === 'star'
+  if (entity.type.startsWith('painter-')) return ['circle', 'square', 'star', 'diamond'].includes(shape)
   if (entity.type === 'stacker') return ['circle-red', 'square', 'square-blue', 'diamond', 'star', 'star-green'].includes(shape)
   if (entity.type === 'furnace') return furnaceRecipes.some((recipe) => recipe.inputs.some((ingredient) => ingredient.shape === shape))
   if (entity.type === 'assembler') {
@@ -596,12 +600,12 @@ function incomingDirection(from: FactoryEntity, to: FactoryEntity): Direction | 
   return undefined
 }
 
-function pointsToInput(index: EntityIndex, belt: FactoryEntity, incoming: Direction): boolean {
+function pointsToInput(project: FactoryProject, index: EntityIndex, belt: FactoryEntity, incoming: Direction): boolean {
   const neighbor = entityAt(index, nextPosition(belt.position, incoming))
   if (!neighbor) return false
   const outputDirection = oppositeDirection(incoming)
   if (neighbor.kind === 'belt') return neighbor.direction === outputDirection
-  return machinePortRoles(neighbor).some((port) => port.role === 'output' && port.direction === outputDirection)
+  return machinePortRoles(neighbor, project, index).some((port) => port.role === 'output' && port.direction === outputDirection)
 }
 
 

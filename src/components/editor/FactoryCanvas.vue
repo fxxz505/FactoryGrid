@@ -1,6 +1,6 @@
 <template>
   <div class="factory-canvas-wrap">
-    <div class="canvas-head">
+    <div v-if="false" class="canvas-head" aria-hidden="true">
       <div>
         <strong>工厂画布</strong>
         <span>拖拽铺传送带或框选区域，按住空格或中键移动画布，滚轮缩放。</span>
